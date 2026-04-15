@@ -1143,6 +1143,148 @@ tbody tr:hover{background:var(--surface2)}
   .thermal-qty{font-size:14px}
   .thermal-name{font-size:12px}
 }
+
+/* =============================================
+   MOBILE FRIENDLY — max-width: 768px
+   ============================================= */
+@media(max-width:768px){
+  /* BODY */
+  body{overflow:auto}
+
+  /* LOGIN */
+  .login-box{width:calc(100vw - 32px);padding:32px 24px;border-radius:12px}
+  .login-brand{font-size:24px}
+
+  /* TOPBAR */
+  .topbar{padding:0 12px;height:52px}
+  .topbar-brand{font-size:15px}
+  .topbar-time{display:none}
+  .topbar-user span#user-display{display:none}
+  #dapur-refresh-badge{display:none!important}
+  .topbar-role-badge{font-size:9px;padding:2px 6px}
+  .logout-btn{padding:4px 8px;font-size:11px}
+  .refresh-btn{padding:3px 7px}
+
+  /* NAV */
+  .nav{padding:0 8px;gap:0}
+  .nav-item{padding:12px 10px;font-size:11px;gap:3px}
+  .nav-icon{font-size:13px}
+
+  /* MAIN pages */
+  .page-scroll{padding:12px}
+
+  /* STAT CARDS */
+  .grid-4{grid-template-columns:1fr 1fr!important}
+  .grid-3{grid-template-columns:1fr 1fr!important}
+  .grid-2{grid-template-columns:1fr!important}
+  .stat-value{font-size:20px}
+  .stat-card::after{font-size:20px;right:10px;top:10px}
+
+  /* DASHBOARD CHARTS */
+  .dash-charts{grid-template-columns:1fr!important}
+
+  /* SECTION HEADER */
+  .section-header{flex-direction:column;align-items:flex-start;gap:8px;margin-bottom:14px}
+  .section-title{font-size:17px}
+
+  /* POS / KASIR — stacked layout */
+  .pos-layout{grid-template-columns:1fr!important;height:auto;overflow:visible;display:flex;flex-direction:column}
+  .pos-menu{height:60vh;min-height:320px;border-right:none;border-bottom:1px solid var(--border)}
+  .pos-cart{height:auto;min-height:unset;flex-shrink:0}
+  .product-grid{grid-template-columns:repeat(auto-fill,minmax(110px,1fr))!important}
+  .prod-img-placeholder{height:64px;font-size:24px}
+  .prod-name{font-size:11px}
+  .prod-price{font-size:10px}
+  .cart-items{max-height:220px}
+  .checkout-btn{font-size:14px;padding:13px}
+
+  /* MODAL */
+  .modal-overlay{padding:8px;align-items:flex-end}
+  .modal{max-width:100%!important;border-radius:16px 16px 0 0;max-height:92vh}
+  .modal-header{padding:16px 16px 12px}
+  .modal-body{padding:16px}
+  .modal-footer{padding:12px 16px;gap:8px}
+  .modal-footer .btn{flex:1;justify-content:center}
+
+  /* FORMS */
+  .form-row{flex-direction:column;gap:0}
+  .form-row .input-group{min-width:unset;width:100%}
+
+  /* KDS */
+  .kds-layout{flex-direction:column;overflow-y:auto}
+  .kds-col{border-right:none;border-bottom:1px solid var(--border);min-height:200px;overflow:visible}
+  .kds-col:last-child{border-bottom:none}
+  .kds-cards{overflow-y:visible;max-height:none}
+  .kds-view-header{flex-wrap:wrap;gap:6px}
+
+  /* ORDER CARDS */
+  .oc-footer{flex-wrap:wrap;gap:6px}
+  .oc-time{flex:none}
+
+  /* TABLES — scroll horizontally */
+  .table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+  table{min-width:520px}
+
+  /* DATE FILTER */
+  .date-filter{flex-wrap:wrap;gap:6px}
+  .date-filter input.input{width:130px!important}
+
+  /* NERACA / BEP inputs */
+  #bep-hari,#bep-target-laba{width:80px!important}
+
+  /* EXPENSE TABLE — tighter */
+  #expense-tbody td,#expense-tbody th{padding:8px 10px;font-size:12px}
+
+  /* SETTINGS TABS */
+  .settings-tabs{overflow-x:auto;padding:0 12px;scrollbar-width:none}
+  .settings-tabs::-webkit-scrollbar{display:none}
+  .settings-tab{white-space:nowrap;padding:10px 12px;font-size:12px}
+  .settings-content{padding:16px}
+
+  /* HPP TABS */
+  .hpp-tabs{flex-wrap:wrap;gap:5px}
+  .hpp-tab{font-size:12px;padding:6px 12px}
+
+  /* TOAST */
+  #toast-container{bottom:12px;right:8px;left:8px}
+  .toast{min-width:unset;width:100%}
+
+  /* EMPTY STATE */
+  .empty-state{padding:32px 16px}
+
+  /* TITIPAN grid */
+  #titipan-stats{grid-template-columns:1fr 1fr!important}
+
+  /* REPORT TABS */
+  .report-tabs{gap:5px}
+  .report-tab{font-size:12px;padding:6px 12px}
+
+  /* SECTION HEADER action buttons stack */
+  .section-header > div:last-child{width:100%;display:flex;flex-wrap:wrap;gap:6px}
+  .section-header > div:last-child .btn{flex:1}
+
+  /* CARD padding tighter on mobile */
+  .card{padding:14px}
+
+  /* Bar chart label width */
+  .bar-label{width:90px;font-size:11px}
+  .bar-val{width:70px;font-size:10px}
+
+  /* Bahan row stacking */
+  .bahan-row{flex-wrap:wrap;gap:6px}
+
+  /* Struk overlay scrollable */
+  #struk-overlay .modal{max-height:92vh}
+}
+
+/* Extra small screens */
+@media(max-width:400px){
+  .grid-4{grid-template-columns:1fr!important}
+  .topbar-role-badge{display:none}
+  .product-grid{grid-template-columns:1fr 1fr!important}
+  .nav-item{padding:10px 7px;font-size:10px}
+  .stat-value{font-size:17px}
+}
 </style>
 </head>
 <body>
