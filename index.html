@@ -2,12 +2,7 @@
 <html lang="id">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-<meta name="mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="Sana Food POS">
-<meta name="theme-color" content="#1a1814">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>SANA FOOD POS</title>
 <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=JetBrains+Mono:wght@300;400;500&family=DM+Sans:ital,wght@0,300;0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
@@ -33,14 +28,26 @@ const firebaseConfig = {
 
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
-window._firebaseModuleReady = true;
 
+// =============================================
+// FIRESTORE COLLECTIONS
+// =============================================
 const COLS = {
-  orders: 'orders', menu: 'menu', categories: 'categories', users: 'users',
-  titipan: 'titipan', titipanLog: 'titipanLog', expenses: 'expenses',
-  settings: 'settings', bahan: 'bahan', resep: 'resep',
+  orders: 'orders',
+  menu: 'menu',
+  categories: 'categories',
+  users: 'users',
+  titipan: 'titipan',
+  titipanLog: 'titipanLog',
+  expenses: 'expenses',
+  settings: 'settings',
+  bahan: 'bahan',
+  resep: 'resep',
 };
 
+// =============================================
+// FIRESTORE HELPER FUNCTIONS
+// =============================================
 function tsToDate(ts) {
   if (!ts) return null;
   if (ts instanceof Date) return ts;
@@ -52,10 +59,42 @@ function tsToDate(ts) {
 function docToObj(docSnap) {
   const d = docSnap.data();
   const obj = { id: docSnap.id, ...d };
+  // Konversi semua Timestamp ke Date
   ['createdAt','readyAt','doneAt','waktu','updatedAt'].forEach(k => {
     if (obj[k]) obj[k] = tsToDate(obj[k]);
   });
   return obj;
+}
+
+// =============================================
+// DB OPERATIONS
+// =============================================
+
+// SEED: cek apakah collection kosong, jika iya isi dengan demo data
+window._db = db;
+window._COLS = COLS;
+window._docToObj = docToObj;
+
+async function ensureSeeded(colName, demoData) {
+  const snap = await getDocs(query(collection(db, colName), limit(1)));
+  if (snap.empty && demoData.length > 0) {
+    const batch = writeBatch(db);
+    demoData.forEach(item => {
+      const { id, ...rest } = item;
+      const ref = doc(db, colName, id);
+      // Konversi Date ke Timestamp
+      const data = {};
+      Object.entries(rest).forEach(([k, v]) => {
+        if (v instanceof Date) data[k] = Timestamp.fromDate(v);
+        else data[k] = v;
+      });
+      batch.set(ref, data);
+    });
+    await batch.commit();
+    console.log(`[Firebase] Seeded ${colName} with ${demoData.length} items`);
+    return true;
+  }
+  return false;
 }
 
 // =============================================
@@ -74,32 +113,38 @@ async function loadAllDataFromFirestore() {
     getDocs(collection(db, COLS.resep)),
   ]);
 
-  window.menuItems = menuSnap.docs.map(docToObj);
-  window.categories = catSnap.docs.map(docToObj);
-  window.users = userSnap.docs.map(docToObj);
-  window.titipanItems = titipanSnap.docs.map(docToObj);
-  window.titipanLog = titipanLogSnap.docs.map(docToObj);
-  window.expenses = expSnap.docs.map(docToObj);
-  window.bahanData = bahanSnap.docs.map(docToObj);
-  window.resepData = resepSnap.docs.map(docToObj);
+  menuItems = menuSnap.docs.map(docToObj);
+  categories = catSnap.docs.map(docToObj);
+  users = userSnap.docs.map(docToObj);
+  titipanItems = titipanSnap.docs.map(docToObj);
+  titipanLog = titipanLogSnap.docs.map(docToObj);
+  expenses = expSnap.docs.map(docToObj);
+  bahanData = bahanSnap.docs.map(docToObj);
+  resepData = resepSnap.docs.map(docToObj);
 
+  // Outlet settings
   if (!settSnap.empty) {
     const s = settSnap.docs[0].data();
-    if (s) Object.assign(window.outletSettings, s);
+    Object.assign(outletSettings, s);
   }
 
+  // Load orders (semua, untuk dashboard & riwayat)
   await loadOrdersFromFirestore();
 }
 
 async function loadOrdersFromFirestore() {
+  // Load 30 hari terakhir untuk performa
+  const d30 = new Date();
+  d30.setDate(d30.getDate() - 30);
   const q = query(collection(db, COLS.orders), orderBy('createdAt','desc'), limit(500));
   const snap = await getDocs(q);
-  window.demoOrders = snap.docs.map(docToObj);
-  window.activeOrders = window.demoOrders.filter(o => o.status === 'cooking' || o.status === 'ready');
+  demoOrders = snap.docs.map(docToObj);
+  activeOrders = demoOrders.filter(o => o.status === 'cooking' || o.status === 'ready');
+  lastKnownOrderCount = activeOrders.length;
 }
 
 // =============================================
-// REALTIME LISTENER
+// REAL-TIME LISTENER UNTUK ORDERS (multi-device)
 // =============================================
 let ordersUnsubscribe = null;
 
@@ -107,76 +152,51 @@ function startOrdersRealtime() {
   if (ordersUnsubscribe) ordersUnsubscribe();
   const q = query(collection(db, COLS.orders), orderBy('createdAt','desc'), limit(500));
   ordersUnsubscribe = onSnapshot(q, (snap) => {
-    const prevActiveIds = new Set(window.activeOrders.map(o => o.id));
-    window.demoOrders = snap.docs.map(docToObj);
-    window.activeOrders = window.demoOrders.filter(o => o.status === 'cooking' || o.status === 'ready');
-
-    const newActive = window.activeOrders.filter(o => !prevActiveIds.has(o.id) && o.status === 'cooking');
-    if (newActive.length > 0 && window.currentUser && window.currentUser.role === 'dapur') {
+    const prevActiveIds = new Set(activeOrders.map(o => o.id));
+    demoOrders = snap.docs.map(docToObj);
+    activeOrders = demoOrders.filter(o => o.status === 'cooking' || o.status === 'ready');
+    
+    // Deteksi order baru untuk notifikasi dapur
+    const newActive = activeOrders.filter(o => !prevActiveIds.has(o.id) && o.status === 'cooking');
+    if (newActive.length > 0 && currentUser && currentUser.role === 'dapur') {
       newActive.forEach(o => { o._isNew = true; });
-      window.pendingDapurNotif += newActive.length;
-      window.checkNewOrdersForDapur && window.checkNewOrdersForDapur();
+      pendingDapurNotif += newActive.length;
+      checkNewOrdersForDapur();
     }
 
-    window.renderActiveOrders && window.renderActiveOrders();
-    window.renderKds && window.renderKds();
-    window.updateOrderBadge && window.updateOrderBadge();
-    if (window.currentUser) window.loadDashboard && window.loadDashboard();
-  }, (err) => { console.error('Realtime orders error:', err); });
+    renderActiveOrders();
+    renderKds();
+    updateOrderBadge();
+    // Refresh dashboard diam-diam jika sudah login
+    if (currentUser) loadDashboard();
+  }, (err) => {
+    console.error('Realtime orders error:', err);
+  });
 }
 
 // =============================================
-// OVERRIDE: doLogin — pakai Firestore
+// OVERRIDE SAVE FUNCTIONS — FIRESTORE
 // =============================================
-window.doLogin = async function() {
-  const u = document.getElementById('login-user').value.trim();
-  const p = document.getElementById('login-pass').value;
-  const errEl = document.getElementById('login-error');
-  errEl.style.display = 'none';
-  if (!u || !p) { errEl.textContent = 'Isi username dan password'; errEl.style.display = 'block'; return; }
 
-  showLoading(true, 'Memverifikasi...');
-  try {
-    const q = query(collection(db, COLS.users), where('username','==',u), where('password','==',p), where('aktif','==',true), limit(1));
-    const snap = await getDocs(q);
-    if (snap.empty) {
-      errEl.textContent = 'Username atau password salah';
-      errEl.style.display = 'block';
-      showLoading(false);
-      return;
-    }
-    window.currentUser = docToObj(snap.docs[0]);
-    sessionStorage.setItem('sana_food_user', JSON.stringify(window.currentUser));
-    await loadAllDataFromFirestore();
-    showLoading(false);
-    afterLogin();
-    startOrdersRealtime();
-  } catch (e) {
-    showLoading(false);
-    errEl.textContent = 'Error: ' + e.message;
-    errEl.style.display = 'block';
-  }
-};
-
-// =============================================
-// OVERRIDE: submitOrder
-// =============================================
+// Submit Order
+const _origSubmitOrder = window.submitOrder;
 window.submitOrder = async function() {
-  if (!window.cart.length) { toast('Keranjang kosong!', 'warn'); return; }
-  const total = window.cart.reduce((s, c) => s + c.qty * c.harga, 0);
+  if (!cart.length) { toast('Keranjang kosong!', 'warn'); return; }
+  const total = cart.reduce((s, c) => s + c.qty * c.harga, 0);
   const customer = document.getElementById('cart-customer').value.trim();
-  if (window.selectedPM === 'tunai') {
+  if (selectedPM === 'tunai') {
     const paid = parseInt(document.getElementById('cash-input').value) || 0;
     if (paid && paid < total) { toast('Uang bayar kurang!', 'error'); return; }
   }
-  for (const item of window.cart) {
+  for (const item of cart) {
     if (item.isTitipan && item.titipanId) {
-      const t = window.titipanItems.find(x => x.id === item.titipanId);
+      const t = titipanItems.find(x => x.id === item.titipanId);
       if (!t || t.stok < item.qty) { toast(`Stok ${item.nama} tidak cukup! Sisa: ${t ? t.stok : 0}`, 'error'); return; }
     }
   }
   showLoading(true, 'Menyimpan order ke database...');
   try {
+    // Hitung nomor order hari ini — pakai transaction agar tidak race condition
     const todayStr = today();
     const counterRef = doc(db, COLS.settings, 'counter_' + todayStr);
     let seq = 1;
@@ -189,108 +209,112 @@ window.submitOrder = async function() {
 
     const orderData = {
       orderNum, customer,
-      items: window.cart.map(c => ({...c})),
-      total, paymentMethod: window.selectedPM, status: 'cooking',
+      items: cart.map(c => ({...c})),
+      total,
+      paymentMethod: selectedPM,
+      status: 'cooking',
       createdAt: serverTimestamp(),
-      kasir: window.currentUser.nama, dateStr: todayStr,
+      kasir: currentUser.nama,
+      dateStr: todayStr,
     };
 
     const orderRef = await addDoc(collection(db, COLS.orders), orderData);
-    orderData.id = orderRef.id;
+    const orderId = orderRef.id;
+    orderData.id = orderId;
     orderData.createdAt = new Date();
 
+    // Kurangi stok titipan + log
     const batch = writeBatch(db);
     const titipanSold = [];
-    for (const item of window.cart) {
+    for (const item of cart) {
       if (item.isTitipan && item.titipanId) {
-        const idx = window.titipanItems.findIndex(x => x.id === item.titipanId);
+        const idx = titipanItems.findIndex(x => x.id === item.titipanId);
         if (idx >= 0) {
-          const newStok = Math.max(0, window.titipanItems[idx].stok - item.qty);
+          const newStok = Math.max(0, titipanItems[idx].stok - item.qty);
           const tersedia = newStok > 0;
-          window.titipanItems[idx].stok = newStok;
-          window.titipanItems[idx].tersedia = tersedia;
+          titipanItems[idx].stok = newStok;
+          titipanItems[idx].tersedia = tersedia;
           batch.update(doc(db, COLS.titipan, item.titipanId), { stok: newStok, tersedia });
           const logRef = doc(collection(db, COLS.titipanLog));
-          batch.set(logRef, { titipanId: item.titipanId, orderId: orderRef.id, orderNum, qty: item.qty, waktu: serverTimestamp(), kasir: window.currentUser.nama, tipe: 'jual' });
+          batch.set(logRef, { titipanId: item.titipanId, orderId, orderNum, qty: item.qty, waktu: serverTimestamp(), kasir: currentUser.nama, tipe: 'jual' });
           titipanSold.push({ nama: item.nama, qty: item.qty, sisaStok: newStok });
         }
       }
     }
     await batch.commit();
 
-    window.demoOrders.unshift({ ...orderData, _isNew: true });
-    window.activeOrders = window.demoOrders.filter(o => o.status === 'cooking' || o.status === 'ready');
-    window.pendingDapurNotif++;
+    // Tambahkan ke local array sementara (realtime listener akan sync)
+    demoOrders.unshift({ ...orderData, _isNew: true });
+    activeOrders = demoOrders.filter(o => o.status === 'cooking' || o.status === 'ready');
+    pendingDapurNotif++;
 
     playSound('new');
     toast(`Order ${orderNum} dikirim ke dapur! 🍳`, 'success');
     if (titipanSold.length) toast(`📦 Stok dikurangi: ${titipanSold.map(x => x.nama + ' ×' + x.qty).join(', ')}`, 'info');
 
-    showStruk({ ...orderData, id: orderRef.id });
-    window.cart = [];
+    showStruk({ ...orderData, id: orderId });
+    cart = [];
     document.getElementById('cart-customer').value = '';
     document.getElementById('cash-input').value = '';
     renderCart(); reRenderQtyBadges(); renderMenuGrid(); renderActiveOrders(); renderKds(); updateOrderBadge(); loadDashboard();
   } catch (e) {
     console.error(e);
     toast('Gagal simpan order: ' + e.message, 'error');
-  } finally { showLoading(false); }
+  } finally {
+    showLoading(false);
+  }
 };
 
-// =============================================
-// OVERRIDE: updateOrderStatus
-// =============================================
+// Update Order Status
+const _origUpdateOrderStatus = window.updateOrderStatus;
 window.updateOrderStatus = async function(id, status) {
   try {
     const updates = { status };
     if (status === 'ready') updates.readyAt = serverTimestamp();
     if (status === 'done') updates.doneAt = serverTimestamp();
     await updateDoc(doc(db, COLS.orders, id), updates);
-    const idx = window.demoOrders.findIndex(o => o.id === id);
+    // Local update
+    const idx = demoOrders.findIndex(o => o.id === id);
     if (idx >= 0) {
-      window.demoOrders[idx].status = status;
-      if (status === 'ready') { window.demoOrders[idx].readyAt = new Date(); playSound('ready'); }
+      demoOrders[idx].status = status;
+      if (status === 'ready') { demoOrders[idx].readyAt = new Date(); playSound('ready'); }
       if (status === 'done') {
-        window.demoOrders[idx].doneAt = new Date();
-        if (window.currentUser.role === 'dapur') printThermalDapur(window.demoOrders[idx]);
+        demoOrders[idx].doneAt = new Date();
+        if (currentUser.role === 'dapur') printThermalDapur(demoOrders[idx]);
       }
     }
-    window.activeOrders = window.demoOrders.filter(o => o.status === 'cooking' || o.status === 'ready');
+    activeOrders = demoOrders.filter(o => o.status === 'cooking' || o.status === 'ready');
     renderActiveOrders(); renderKds(); updateOrderBadge(); loadDashboard();
     toast(status === 'ready' ? 'Order siap saji! ✅' : status === 'done' ? 'Order selesai! ✅' : status === 'cancelled' ? 'Order dibatalkan' : 'Diperbarui', 'success');
   } catch (e) { toast('Gagal update: ' + e.message, 'error'); }
 };
 
-// =============================================
-// OVERRIDE: selesaikanOrder
-// =============================================
+// Selesaikan Order dari struk
 window.selesaikanOrder = async function(orderId) {
   try {
     await updateDoc(doc(db, COLS.orders, orderId), { status: 'done', doneAt: serverTimestamp() });
-    const idx = window.demoOrders.findIndex(o => o.id === orderId);
-    if (idx >= 0) { window.demoOrders[idx].status = 'done'; window.demoOrders[idx].doneAt = new Date(); }
-    window.activeOrders = window.demoOrders.filter(o => o.status === 'cooking' || o.status === 'ready');
+    const idx = demoOrders.findIndex(o => o.id === orderId);
+    if (idx >= 0) { demoOrders[idx].status = 'done'; demoOrders[idx].doneAt = new Date(); }
+    activeOrders = demoOrders.filter(o => o.status === 'cooking' || o.status === 'ready');
     closeStruk(); renderActiveOrders(); renderKds(); updateOrderBadge(); loadDashboard();
     toast('Order diselesaikan! ✅', 'success');
   } catch (e) { toast('Gagal: ' + e.message, 'error'); }
 };
 
-// =============================================
-// OVERRIDE: saveMenu
-// =============================================
+// Menu CRUD
 window.saveMenu = async function(menuId) {
   const nama = document.getElementById('m-nama').value.trim();
   const harga = parseInt(document.getElementById('m-harga').value) || 0;
   if (!nama || !harga) { toast('Isi nama dan harga!', 'warn'); return; }
-  const data = { nama, harga, categoryId: document.getElementById('m-cat').value, emoji: document.getElementById('m-emoji').value || '🍽', tersedia: document.getElementById('m-status').value === '1', urutan: window.menuItems.length + 1 };
+  const data = { nama, harga, categoryId: document.getElementById('m-cat').value, emoji: document.getElementById('m-emoji').value || '🍽', tersedia: document.getElementById('m-status').value === '1', urutan: menuItems.length + 1 };
   try {
     if (menuId) {
       await updateDoc(doc(db, COLS.menu, menuId), data);
-      const idx = window.menuItems.findIndex(m => m.id === menuId);
-      if (idx >= 0) Object.assign(window.menuItems[idx], data);
+      const idx = menuItems.findIndex(m => m.id === menuId);
+      if (idx >= 0) Object.assign(menuItems[idx], data);
     } else {
       const ref = await addDoc(collection(db, COLS.menu), data);
-      window.menuItems.push({ id: ref.id, ...data });
+      menuItems.push({ id: ref.id, ...data });
     }
     closeModal(); renderMenuGrid(); renderSettingsMenu(); toast('Menu disimpan!', 'success');
   } catch (e) { toast('Gagal: ' + e.message, 'error'); }
@@ -299,25 +323,23 @@ window.saveMenu = async function(menuId) {
 window.confirmDeleteMenu = async function(menuId) {
   try {
     await deleteDoc(doc(db, COLS.menu, menuId));
-    window.menuItems = window.menuItems.filter(m => m.id !== menuId);
+    menuItems = menuItems.filter(m => m.id !== menuId);
     closeModal(); renderMenuGrid(); renderSettingsMenu(); toast('Dihapus', 'warn');
   } catch (e) { toast('Gagal: ' + e.message, 'error'); }
 };
 
-// =============================================
-// OVERRIDE: saveCat / confirmDeleteCat
-// =============================================
+// Kategori CRUD
 window.saveCat = async function(catId) {
   const nama = document.getElementById('c-nama').value.trim();
   if (!nama) { toast('Isi nama!', 'warn'); return; }
   try {
     if (catId) {
       await updateDoc(doc(db, COLS.categories, catId), { nama });
-      const idx = window.categories.findIndex(c => c.id === catId);
-      if (idx >= 0) window.categories[idx].nama = nama;
+      const idx = categories.findIndex(c => c.id === catId);
+      if (idx >= 0) categories[idx].nama = nama;
     } else {
-      const ref = await addDoc(collection(db, COLS.categories), { nama, urutan: window.categories.length + 1 });
-      window.categories.push({ id: ref.id, nama, urutan: window.categories.length + 1 });
+      const ref = await addDoc(collection(db, COLS.categories), { nama, urutan: categories.length + 1 });
+      categories.push({ id: ref.id, nama, urutan: categories.length + 1 });
     }
     closeModal(); renderCatFilter(); renderSettingsCat(); toast('Kategori disimpan!', 'success');
   } catch (e) { toast('Gagal: ' + e.message, 'error'); }
@@ -326,14 +348,12 @@ window.saveCat = async function(catId) {
 window.confirmDeleteCat = async function(catId) {
   try {
     await deleteDoc(doc(db, COLS.categories, catId));
-    window.categories = window.categories.filter(c => c.id !== catId);
+    categories = categories.filter(c => c.id !== catId);
     closeModal(); renderCatFilter(); renderSettingsCat(); toast('Dihapus', 'warn');
   } catch (e) { toast('Gagal: ' + e.message, 'error'); }
 };
 
-// =============================================
-// OVERRIDE: saveUser / confirmDeleteUser
-// =============================================
+// User CRUD
 window.saveUser = async function(userId) {
   const nama = document.getElementById('u-nama').value.trim();
   const username = document.getElementById('u-username').value.trim();
@@ -345,13 +365,13 @@ window.saveUser = async function(userId) {
   try {
     if (userId) {
       await updateDoc(doc(db, COLS.users, userId), data);
-      const idx = window.users.findIndex(u => u.id === userId);
-      if (idx >= 0) Object.assign(window.users[idx], data);
+      const idx = users.findIndex(u => u.id === userId);
+      if (idx >= 0) Object.assign(users[idx], data);
     } else {
       if (!pass) { toast('Password wajib untuk user baru!', 'warn'); return; }
-      if (window.users.find(u => u.username === username)) { toast('Username sudah dipakai!', 'error'); return; }
+      if (users.find(u => u.username === username)) { toast('Username sudah dipakai!', 'error'); return; }
       const ref = await addDoc(collection(db, COLS.users), data);
-      window.users.push({ id: ref.id, ...data });
+      users.push({ id: ref.id, ...data });
     }
     closeModal(); renderSettingsUsers(); toast('User disimpan!', 'success');
   } catch (e) { toast('Gagal: ' + e.message, 'error'); }
@@ -360,14 +380,12 @@ window.saveUser = async function(userId) {
 window.confirmDeleteUser = async function(userId) {
   try {
     await deleteDoc(doc(db, COLS.users, userId));
-    window.users = window.users.filter(u => u.id !== userId);
+    users = users.filter(u => u.id !== userId);
     closeModal(); renderSettingsUsers(); toast('User dihapus', 'warn');
   } catch (e) { toast('Gagal: ' + e.message, 'error'); }
 };
 
-// =============================================
-// OVERRIDE: saveTitipan / doRestock / confirmDeleteTitipan
-// =============================================
+// Titipan CRUD
 window.saveTitipan = async function(id) {
   const nama = document.getElementById('ti-nama').value.trim();
   const harga = parseInt(document.getElementById('ti-harga').value) || 0;
@@ -377,16 +395,17 @@ window.saveTitipan = async function(id) {
   const baseData = { nama, emoji: document.getElementById('ti-emoji').value || '📦', penitip: document.getElementById('ti-penitip').value.trim(), teleponPenitip: document.getElementById('ti-telp').value.trim(), harga, hargaBeli, tersedia: stokBaru > 0, categoryId: 'titipan' };
   try {
     if (id) {
-      const idx = window.titipanItems.findIndex(x => x.id === id);
+      const idx = titipanItems.findIndex(x => x.id === id);
       if (idx < 0) return;
-      const newStok = Math.max(0, stokBaru - ((window.titipanItems[idx].stokAwal || 0) - (window.titipanItems[idx].stok || 0)));
+      const stokLama = titipanItems[idx].stokAwal || 0;
+      const newStok = Math.max(0, stokBaru - (stokLama - (titipanItems[idx].stok || 0)));
       const data = { ...baseData, stokAwal: stokBaru, stok: newStok };
       await updateDoc(doc(db, COLS.titipan, id), data);
-      window.titipanItems[idx] = { ...window.titipanItems[idx], ...data };
+      titipanItems[idx] = { ...titipanItems[idx], ...data };
     } else {
       const data = { ...baseData, stokAwal: stokBaru, stok: stokBaru, createdAt: serverTimestamp() };
       const ref = await addDoc(collection(db, COLS.titipan), data);
-      window.titipanItems.push({ id: ref.id, ...data, createdAt: new Date() });
+      titipanItems.push({ id: ref.id, ...data, createdAt: new Date() });
     }
     closeModal(); renderTitipan(); renderMenuGrid(); renderCatFilter(); toast('Titipan disimpan!', 'success');
   } catch (e) { toast('Gagal: ' + e.message, 'error'); }
@@ -395,19 +414,19 @@ window.saveTitipan = async function(id) {
 window.doRestock = async function(id) {
   const qty = parseInt(document.getElementById('rs-qty').value) || 0;
   if (qty <= 0) { toast('Masukkan jumlah restock!', 'warn'); return; }
-  const idx = window.titipanItems.findIndex(x => x.id === id);
+  const idx = titipanItems.findIndex(x => x.id === id);
   if (idx < 0) return;
-  const newStok = window.titipanItems[idx].stok + qty;
-  const newStokAwal = Math.max(window.titipanItems[idx].stokAwal || 0, newStok);
+  const newStok = titipanItems[idx].stok + qty;
+  const newStokAwal = Math.max(titipanItems[idx].stokAwal || 0, newStok);
   try {
     const batch = writeBatch(db);
     batch.update(doc(db, COLS.titipan, id), { stok: newStok, stokAwal: newStokAwal, tersedia: true });
     const logRef = doc(collection(db, COLS.titipanLog));
-    batch.set(logRef, { titipanId: id, qty, waktu: serverTimestamp(), kasir: window.currentUser.nama, tipe: 'restock', orderNum: '' });
+    batch.set(logRef, { titipanId: id, qty, waktu: serverTimestamp(), kasir: currentUser.nama, tipe: 'restock', orderNum: '' });
     await batch.commit();
-    window.titipanItems[idx].stok = newStok;
-    window.titipanItems[idx].stokAwal = newStokAwal;
-    window.titipanItems[idx].tersedia = true;
+    titipanItems[idx].stok = newStok;
+    titipanItems[idx].stokAwal = newStokAwal;
+    titipanItems[idx].tersedia = true;
     closeModal(); renderTitipan(); renderMenuGrid(); toast(`Stok ditambah ${qty} pcs ✓`, 'success');
   } catch (e) { toast('Gagal: ' + e.message, 'error'); }
 };
@@ -415,8 +434,8 @@ window.doRestock = async function(id) {
 window.setTersediaTitipan = async function(id, val) {
   try {
     await updateDoc(doc(db, COLS.titipan, id), { tersedia: val });
-    const idx = window.titipanItems.findIndex(x => x.id === id);
-    if (idx >= 0) window.titipanItems[idx].tersedia = val;
+    const idx = titipanItems.findIndex(x => x.id === id);
+    if (idx >= 0) titipanItems[idx].tersedia = val;
     renderTitipan(); renderMenuGrid(); toast(val ? 'Diaktifkan' : 'Dinonaktifkan', 'info');
   } catch (e) { toast('Gagal: ' + e.message, 'error'); }
 };
@@ -424,41 +443,43 @@ window.setTersediaTitipan = async function(id, val) {
 window.confirmDeleteTitipan = async function(id) {
   try {
     await deleteDoc(doc(db, COLS.titipan, id));
-    window.titipanItems = window.titipanItems.filter(x => x.id !== id);
+    titipanItems = titipanItems.filter(x => x.id !== id);
     closeModal(); renderTitipan(); renderMenuGrid(); toast('Titipan dihapus', 'warn');
   } catch (e) { toast('Gagal: ' + e.message, 'error'); }
 };
 
-// =============================================
-// OVERRIDE: saveExpense / confirmDeleteExpense
-// =============================================
-window.saveExpense = async function() {
-  const desc = document.getElementById('exp-desc')?.value.trim() || '';
-  const amount = parseFloat(document.getElementById('exp-amount')?.value) || 0;
-  const date = document.getElementById('exp-date')?.value || today();
-  const kategori = document.getElementById('exp-cat')?.value || 'lainnya';
-  const periode = document.getElementById('exp-period')?.value || 'bulanan';
-  if (!desc) { toast('Deskripsi wajib diisi!', 'warn'); return; }
-  if (amount <= 0) { toast('Nominal harus lebih dari 0!', 'warn'); return; }
-  const data = { tanggal: date, kategori, deskripsi: desc, nominal: amount, periode, createdBy: window.currentUser.nama, createdAt: serverTimestamp() };
+// Expenses CRUD
+window.saveExpense = async function(expId) {
+  const tanggal = document.getElementById('exp-tanggal')?.value || today();
+  const kategori = document.getElementById('exp-kategori')?.value || 'lainnya';
+  const deskripsi = document.getElementById('exp-deskripsi')?.value.trim() || '';
+  const nominal = parseInt(document.getElementById('exp-nominal')?.value) || 0;
+  const periode = document.getElementById('exp-periode')?.value || 'harian';
+  if (!deskripsi || !nominal) { toast('Isi deskripsi dan nominal!', 'warn'); return; }
+  const data = { tanggal, kategori, deskripsi, nominal, periode, createdBy: currentUser.nama };
   try {
-    const ref = await addDoc(collection(db, COLS.expenses), data);
-    window.expenses.push({ id: ref.id, ...data, createdAt: new Date() });
+    if (expId) {
+      await updateDoc(doc(db, COLS.expenses, expId), data);
+      const idx = expenses.findIndex(e => e.id === expId);
+      if (idx >= 0) Object.assign(expenses[idx], data);
+    } else {
+      data.createdAt = serverTimestamp();
+      const ref = await addDoc(collection(db, COLS.expenses), data);
+      expenses.push({ id: ref.id, ...data, createdAt: new Date() });
+    }
     closeModal(); renderPengeluaran(); toast('Pengeluaran disimpan!', 'success');
   } catch (e) { toast('Gagal: ' + e.message, 'error'); }
 };
 
-window.deleteExpense = async function(id) {
+window.confirmDeleteExpense = async function(expId) {
   try {
-    await deleteDoc(doc(db, COLS.expenses, id));
-    window.expenses = window.expenses.filter(x => x.id !== id);
-    renderPengeluaran(); toast('Dihapus', 'warn');
+    await deleteDoc(doc(db, COLS.expenses, expId));
+    expenses = expenses.filter(e => e.id !== expId);
+    closeModal(); renderPengeluaran(); toast('Dihapus', 'warn');
   } catch (e) { toast('Gagal: ' + e.message, 'error'); }
 };
 
-// =============================================
-// OVERRIDE: saveOutletSettings
-// =============================================
+// Outlet Settings
 window.saveOutletSettings = async function() {
   const data = {
     nama: document.getElementById('s-nama')?.value.trim() || 'Sana Food',
@@ -470,14 +491,12 @@ window.saveOutletSettings = async function() {
   };
   try {
     await setDoc(doc(db, COLS.settings, 'outlet'), data);
-    Object.assign(window.outletSettings, data);
+    Object.assign(outletSettings, data);
     toast('Pengaturan disimpan! ✅', 'success');
   } catch (e) { toast('Gagal: ' + e.message, 'error'); }
 };
 
-// =============================================
-// OVERRIDE: saveBahan / confirmDeleteBahan
-// =============================================
+// Bahan Baku CRUD
 window.saveBahan = async function(bahanId) {
   const nama = document.getElementById('bh-nama')?.value.trim();
   const satuan = document.getElementById('bh-satuan')?.value.trim();
@@ -489,12 +508,12 @@ window.saveBahan = async function(bahanId) {
   try {
     if (bahanId) {
       await updateDoc(doc(db, COLS.bahan, bahanId), data);
-      const idx = window.bahanData.findIndex(x => x.id === bahanId);
-      if (idx >= 0) Object.assign(window.bahanData[idx], data);
+      const idx = bahanData.findIndex(x => x.id === bahanId);
+      if (idx >= 0) Object.assign(bahanData[idx], data);
       toast('Bahan diupdate ✅', 'success');
     } else {
       const ref = await addDoc(collection(db, COLS.bahan), data);
-      window.bahanData.push({ id: ref.id, ...data });
+      bahanData.push({ id: ref.id, ...data });
       toast('Bahan ditambahkan ✅', 'success');
     }
     closeModal(); renderBahanTable(); renderHppDaftar(); renderAnalisaMargin();
@@ -504,15 +523,13 @@ window.saveBahan = async function(bahanId) {
 window.confirmDeleteBahan = async function(bahanId) {
   try {
     await deleteDoc(doc(db, COLS.bahan, bahanId));
-    window.bahanData = window.bahanData.filter(x => x.id !== bahanId);
+    bahanData = bahanData.filter(x => x.id !== bahanId);
     closeModal(); toast('Bahan dihapus', 'info');
     renderBahanTable(); renderHppDaftar(); renderAnalisaMargin();
   } catch (e) { toast('Gagal: ' + e.message, 'error'); }
 };
 
-// =============================================
-// OVERRIDE: saveResep / confirmDeleteResep
-// =============================================
+// Resep CRUD
 window.saveResep = async function(resepId) {
   const nama = document.getElementById('r-nama')?.value.trim();
   const emoji = document.getElementById('r-emoji')?.value.trim() || '🍽';
@@ -526,12 +543,12 @@ window.saveResep = async function(resepId) {
   try {
     if (resepId) {
       await updateDoc(doc(db, COLS.resep, resepId), data);
-      const idx = window.resepData.findIndex(x => x.id === resepId);
-      if (idx >= 0) Object.assign(window.resepData[idx], data);
+      const idx = resepData.findIndex(x => x.id === resepId);
+      if (idx >= 0) Object.assign(resepData[idx], data);
       toast('Resep berhasil diupdate ✅', 'success');
     } else {
       const ref = await addDoc(collection(db, COLS.resep), data);
-      window.resepData.push({ id: ref.id, ...data });
+      resepData.push({ id: ref.id, ...data });
       toast('Resep berhasil dibuat ✅', 'success');
     }
     resepRowCount = 1;
@@ -542,15 +559,109 @@ window.saveResep = async function(resepId) {
 window.confirmDeleteResep = async function(resepId) {
   try {
     await deleteDoc(doc(db, COLS.resep, resepId));
-    window.resepData = window.resepData.filter(x => x.id !== resepId);
+    resepData = resepData.filter(x => x.id !== resepId);
     closeModal(); toast('Resep dihapus', 'info');
     renderHppDaftar(); renderAnalisaMargin(); renderKalkulatorInit();
   } catch (e) { toast('Gagal: ' + e.message, 'error'); }
 };
 
 // =============================================
-// OVERRIDE: loadRiwayat
+// LOGIN — Cek dari Firestore
 // =============================================
+window.doLogin = async function() {
+  const u = document.getElementById('login-user').value.trim();
+  const p = document.getElementById('login-pass').value;
+  const errEl = document.getElementById('login-error');
+  errEl.style.display = 'none';
+  if (!u || !p) { errEl.textContent = 'Isi username dan password'; errEl.style.display = 'block'; return; }
+  
+  showLoading(true, 'Memverifikasi...');
+  try {
+    const q = query(collection(db, COLS.users), where('username','==',u), where('password','==',p), where('aktif','==',true), limit(1));
+    const snap = await getDocs(q);
+    if (snap.empty) {
+      errEl.textContent = 'Username atau password salah';
+      errEl.style.display = 'block';
+      showLoading(false);
+      return;
+    }
+    currentUser = docToObj(snap.docs[0]);
+    sessionStorage.setItem('sana_food_user', JSON.stringify(currentUser));
+    await loadAllDataFromFirestore();
+    showLoading(false);
+    afterLogin();
+    startOrdersRealtime();
+  } catch (e) {
+    showLoading(false);
+    errEl.textContent = 'Error: ' + e.message;
+    errEl.style.display = 'block';
+  }
+};
+
+// =============================================
+// INIT — Hanya koneksi ke Firestore, tanpa seed demo data
+// =============================================
+async function initFirebase() {
+  showLoading(true, 'Menghubungkan ke database...');
+  try {
+    // Pastikan koneksi Firestore aktif dengan query ringan
+    await getDocs(query(collection(db, COLS.settings), limit(1)));
+    console.log('[Firebase] Koneksi berhasil');
+  } catch (e) {
+    console.error('[Firebase] Init error:', e);
+    toast('Koneksi database gagal. Coba reload.', 'error');
+  } finally {
+    showLoading(false);
+  }
+}
+
+// Cek session yang tersimpan
+(async function() {
+  await initFirebase();
+  const saved = sessionStorage.getItem('sana_food_user');
+  if (saved) {
+    try {
+      currentUser = JSON.parse(saved);
+      showLoading(true, 'Memuat data...');
+      await loadAllDataFromFirestore();
+      showLoading(false);
+      afterLogin();
+      startOrdersRealtime();
+    } catch (e) {
+      showLoading(false);
+      sessionStorage.removeItem('sana_food_user');
+      console.error(e);
+    }
+  }
+})();
+
+// Override logout untuk stop realtime listener
+const _origConfirmLogout = window.confirmLogout;
+window.confirmLogout = function() {
+  if (ordersUnsubscribe) { ordersUnsubscribe(); ordersUnsubscribe = null; }
+  closeModal();
+  if (clockInterval) clearInterval(clockInterval);
+  if (kdsInterval) clearInterval(kdsInterval);
+  stopDapurAutoRefresh();
+  currentUser = null; cart = [];
+  sessionStorage.removeItem('sana_food_user');
+  document.getElementById('login-screen').classList.remove('hidden');
+  document.getElementById('app').style.display = 'none';
+};
+
+// Override softRefresh untuk load ulang data dari Firestore
+window.softRefresh = async function() {
+  const btn = document.getElementById('soft-refresh-btn');
+  btn?.classList.add('spinning');
+  try {
+    await loadAllDataFromFirestore();
+    renderMenuGrid(); renderCatFilter(); renderActiveOrders(); renderKds(); updateOrderBadge(); loadDashboard();
+    toast('Data berhasil diperbarui ✓', 'success');
+  } catch (e) { toast('Refresh gagal: ' + e.message, 'error'); }
+  finally { setTimeout(() => btn?.classList.remove('spinning'), 600); }
+};
+
+// Override loadRiwayat untuk load dari Firestore
 window.loadRiwayat = async function() {
   const date = document.getElementById('riwayat-date').value;
   const el = document.getElementById('riwayat-list');
@@ -573,76 +684,6 @@ window.loadRiwayat = async function() {
   } catch (e) { el.innerHTML = '<div class="alert alert-danger">Gagal load riwayat: ' + e.message + '</div>'; }
 };
 
-// =============================================
-// OVERRIDE: softRefresh
-// =============================================
-window.softRefresh = async function() {
-  const btn = document.getElementById('soft-refresh-btn');
-  btn?.classList.add('spinning');
-  showLoading(true, 'Memuat ulang data dari database...');
-  try {
-    await loadAllDataFromFirestore();
-    renderMenuGrid(); renderCatFilter(); renderActiveOrders(); renderKds(); updateOrderBadge(); loadDashboard();
-    toast('Data berhasil diperbarui ✓', 'success');
-  } catch (e) { toast('Refresh gagal: ' + e.message, 'error'); }
-  finally {
-    showLoading(false);
-    setTimeout(() => btn?.classList.remove('spinning'), 600);
-  }
-};
-
-// =============================================
-// OVERRIDE: confirmLogout — stop realtime listener
-// =============================================
-window.confirmLogout = function() {
-  if (ordersUnsubscribe) { ordersUnsubscribe(); ordersUnsubscribe = null; }
-  closeModal();
-  if (window.clockInterval) clearInterval(window.clockInterval);
-  if (window.kdsInterval) clearInterval(window.kdsInterval);
-  window.stopDapurAutoRefresh && window.stopDapurAutoRefresh();
-  window.currentUser = null; window.cart = [];
-  sessionStorage.removeItem('sana_food_user');
-  document.getElementById('login-screen').classList.remove('hidden');
-  document.getElementById('app').style.display = 'none';
-  const bn = document.getElementById('bottom-nav');
-  const fab = document.getElementById('cart-fab');
-  if (bn) bn.style.display = 'none';
-  if (fab) fab.style.display = 'none';
-};
-
-// =============================================
-// INIT — cek session, load dari Firestore
-// =============================================
-(async function() {
-  showLoading(true, 'Menghubungkan ke database...');
-  try {
-    await getDocs(query(collection(db, COLS.settings), limit(1)));
-    console.log('[Firebase] Koneksi berhasil');
-  } catch (e) {
-    console.error('[Firebase] Init error:', e);
-    toast('Koneksi database gagal. Coba reload.', 'error');
-    showLoading(false);
-    return;
-  }
-
-  const saved = sessionStorage.getItem('sana_food_user');
-  if (saved) {
-    try {
-      window.currentUser = JSON.parse(saved);
-      showLoading(true, 'Memuat data...');
-      await loadAllDataFromFirestore();
-      showLoading(false);
-      afterLogin();
-      startOrdersRealtime();
-    } catch (e) {
-      showLoading(false);
-      sessionStorage.removeItem('sana_food_user');
-      console.error(e);
-    }
-  } else {
-    showLoading(false);
-  }
-})();
 </script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
@@ -693,6 +734,11 @@ code,.mono{font-family:'JetBrains Mono',monospace}
 .topbar-role-badge{font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;background:rgba(200,64,42,.25);color:#f0a090;padding:3px 8px;border-radius:4px}
 .logout-btn{background:none;border:1px solid #333;color:#aaa;padding:5px 12px;border-radius:6px;cursor:pointer;font-size:12px;transition:all .2s}
 .logout-btn:hover{border-color:#666;color:#fff}
+.refresh-btn{background:none;border:1px solid #333;color:#aaa;padding:4px 9px;border-radius:6px;cursor:pointer;font-size:16px;transition:all .2s;line-height:1;display:flex;align-items:center;justify-content:center}
+.refresh-btn:hover{border-color:#888;color:#fff}
+.refresh-btn .ri{display:inline-block;transition:transform .1s}
+.refresh-btn.spinning .ri{animation:softRefreshSpin .6s linear infinite}
+@keyframes softRefreshSpin{to{transform:rotate(360deg)}}
 .order-notify{background:var(--accent);color:#fff;width:20px;height:20px;border-radius:50%;font-size:11px;font-weight:700;display:none;align-items:center;justify-content:center}
 .order-notify.show{display:flex}
 
@@ -1047,6 +1093,44 @@ tbody tr:hover{background:var(--surface2)}
 .kds-card.new-order{animation:newOrderFlash .6s ease 3;border-color:var(--accent)!important}
 @keyframes newOrderFlash{0%,100%{background:var(--surface)}50%{background:#fde8e4}}
 
+/* HPP / RESEP */
+.hpp-tabs{display:flex;gap:6px;margin-bottom:20px;flex-wrap:wrap}
+.hpp-tab{padding:7px 18px;border-radius:8px;border:1.5px solid var(--border);background:var(--surface);cursor:pointer;font-size:13px;font-weight:500;transition:all .2s}
+.hpp-tab.active{background:var(--accent2);color:#fff;border-color:var(--accent2)}
+.hpp-section{display:none}.hpp-section.active{display:block}
+.resep-card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px;margin-bottom:8px;cursor:pointer;transition:all .2s}
+.resep-card:hover{border-color:var(--accent2);box-shadow:var(--shadow)}
+.resep-card.selected{border-color:var(--accent2);background:#f0f4ff}
+.resep-header{display:flex;align-items:center;gap:10px}
+.resep-emoji{font-size:24px;width:38px;text-align:center}
+.resep-info{flex:1}
+.resep-nama{font-weight:700;font-size:14px}
+.resep-meta{font-size:12px;color:var(--ink3);margin-top:2px}
+.resep-hpp-badge{font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:700;color:var(--accent);background:#fde8e4;padding:3px 9px;border-radius:6px}
+.resep-margin-badge{font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:700;color:var(--accent3);background:#d4f0e2;padding:3px 9px;border-radius:6px}
+.bahan-row{display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--border)}
+.bahan-row:last-child{border-bottom:none}
+.bahan-nama{flex:1;font-size:13px}
+.bahan-qty{font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--ink2);min-width:70px}
+.bahan-satuan{font-size:12px;color:var(--ink3);min-width:50px}
+.bahan-harga{font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--accent);min-width:90px;text-align:right}
+.hpp-summary{background:linear-gradient(135deg,var(--accent2) 0%,#1a55a8 100%);color:#fff;border-radius:12px;padding:20px;margin-bottom:16px}
+.hpp-summary-title{font-size:11px;text-transform:uppercase;letter-spacing:.8px;font-weight:600;opacity:.8;margin-bottom:8px}
+.hpp-summary-value{font-family:'Syne',sans-serif;font-size:32px;font-weight:800;letter-spacing:-1px}
+.hpp-summary-sub{font-size:13px;opacity:.85;margin-top:4px}
+.hpp-margin-bar{background:rgba(255,255,255,.2);border-radius:6px;height:8px;margin-top:12px;overflow:hidden}
+.hpp-margin-fill{height:100%;border-radius:6px;background:#fff;transition:width .5s ease}
+.porsi-calc-box{background:var(--bg);border:1.5px solid var(--border);border-radius:10px;padding:16px;margin-top:12px}
+.porsi-result{font-family:'Syne',sans-serif;font-size:28px;font-weight:800;color:var(--accent2);margin:8px 0}
+.porsi-detail-row{display:flex;justify-content:space-between;font-size:12px;padding:4px 0;border-bottom:1px dashed var(--border);color:var(--ink2)}
+.porsi-detail-row:last-child{border-bottom:none}
+.hpp-alert-low{background:#fef3d4;border:1px solid #f0d060;color:#7a5000;border-radius:8px;padding:10px 14px;font-size:12px;margin-bottom:8px}
+.hpp-margin-badge{display:inline-flex;align-items:center;padding:3px 9px;border-radius:20px;font-size:11px;font-weight:700}
+.hpp-margin-ok{background:#d4f0e2;color:#1a6040}
+.hpp-margin-warn{background:#fef3d4;color:#8a5000}
+.hpp-margin-bad{background:#fde8e4;color:#8a2010}
+.link-menu-badge{background:#ddeeff;color:#1a44a8;font-size:11px;font-weight:600;padding:3px 8px;border-radius:6px;border:1px solid #b8d4f8}
+
 /* PRINT */
 #print-area{display:none}
 @media print{
@@ -1058,254 +1142,6 @@ tbody tr:hover{background:var(--surface2)}
   .thermal-order-num{font-size:24px}
   .thermal-qty{font-size:14px}
   .thermal-name{font-size:12px}
-}
-
-/* =============================================
-   MOBILE RESPONSIVE — ANDROID & iOS
-   ============================================= */
-
-/* Prevent tap highlight & zoom on inputs iOS */
-*{-webkit-tap-highlight-color:transparent;-webkit-text-size-adjust:100%}
-input,select,textarea,button{font-size:16px!important} /* prevent iOS zoom on focus */
-
-@media(max-width:768px){
-  /* BODY */
-  body{overflow:auto}
-
-  /* LOGIN */
-  .login-box{width:calc(100% - 32px);max-width:380px;padding:32px 24px;margin:16px}
-  .login-brand{font-size:24px}
-  .login-input{font-size:16px!important;padding:14px 16px}
-  .login-btn{padding:15px;font-size:16px!important}
-
-  /* APP SHELL */
-  #app{height:100dvh;height:100vh}
-
-  /* TOPBAR - compact */
-  .topbar{padding:0 12px;height:50px}
-  .topbar-brand{font-size:15px}
-  .topbar-time{display:none}
-  .topbar-role-badge{display:none}
-  #user-display{display:none}
-  .user-avatar{width:28px;height:28px;font-size:11px}
-  .logout-btn{padding:5px 10px;font-size:12px!important}
-
-  /* TOP NAV - hide on mobile, replaced by bottom nav */
-  .nav{display:none}
-
-  /* BOTTOM NAV */
-  #bottom-nav{
-    display:flex;
-    position:fixed;
-    bottom:0;left:0;right:0;
-    background:var(--ink);
-    z-index:200;
-    height:58px;
-    border-top:1px solid #333;
-    padding-bottom:env(safe-area-inset-bottom);
-  }
-  .bn-item{
-    flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;
-    color:#888;cursor:pointer;gap:2px;padding:6px 2px;transition:color .2s;position:relative;
-    -webkit-tap-highlight-color:transparent;
-    user-select:none;
-  }
-  .bn-item.active{color:var(--accent)}
-  .bn-item .bn-icon{font-size:20px;line-height:1}
-  .bn-item .bn-label{font-size:9px;font-weight:600;letter-spacing:.3px;text-transform:uppercase}
-  .bn-badge{position:absolute;top:4px;right:calc(50% - 18px);background:var(--accent);color:#fff;font-size:9px;width:16px;height:16px;border-radius:50%;display:none;align-items:center;justify-content:center;font-weight:700}
-  .bn-badge.show{display:flex}
-
-  /* More menu overlay */
-  #mobile-more-menu{
-    display:none;position:fixed;bottom:58px;left:0;right:0;background:var(--ink);z-index:199;
-    border-top:1px solid #333;padding:8px 0;
-  }
-  #mobile-more-menu.open{display:block}
-  .mm-item{display:flex;align-items:center;gap:12px;padding:13px 20px;color:#ccc;cursor:pointer;font-size:14px;transition:background .15s}
-  .mm-item:hover,.mm-item:active{background:#333}
-  .mm-item .mm-icon{font-size:18px;width:24px;text-align:center}
-
-  /* MAIN & PAGES */
-  .main{flex:1;overflow:hidden;padding-bottom:58px}
-  .page-scroll{padding:16px;padding-bottom:72px}
-
-  /* SECTION HEADER */
-  .section-title{font-size:17px}
-  .section-header{margin-bottom:14px}
-
-  /* STAT CARDS */
-  .stat-value{font-size:20px}
-  .stat-card{padding:14px}
-  .grid-4{grid-template-columns:1fr 1fr;gap:10px}
-  .grid-3{grid-template-columns:1fr 1fr;gap:10px}
-  .grid-2{grid-template-columns:1fr;gap:10px}
-
-  /* DASHBOARD CHARTS */
-  .dash-charts{grid-template-columns:1fr;gap:10px}
-
-  /* POS LAYOUT - full mobile */
-  .pos-layout{
-    display:flex;flex-direction:column;height:100%;overflow:hidden;
-    grid-template-columns:unset;
-  }
-  .pos-menu{
-    flex:1;overflow:hidden;display:flex;flex-direction:column;
-    border-right:none;border-bottom:1px solid var(--border);
-  }
-  .pos-cart{
-    height:auto;flex-shrink:0;
-    max-height:55vh;
-    display:flex;flex-direction:column;
-    overflow:hidden;
-  }
-
-  /* POS - when cart is toggled open */
-  .pos-layout.cart-open .pos-menu{flex:0;max-height:0;overflow:hidden;border:none}
-  .pos-layout.cart-open .pos-cart{max-height:100%;flex:1}
-
-  /* Cart toggle FAB */
-  #cart-fab{
-    display:flex;position:fixed;bottom:68px;right:16px;z-index:150;
-    width:56px;height:56px;border-radius:50%;
-    background:var(--accent);color:#fff;
-    border:none;cursor:pointer;
-    align-items:center;justify-content:center;
-    font-size:24px;
-    box-shadow:0 4px 20px rgba(200,64,42,.5);
-    transition:transform .2s,background .2s;
-  }
-  #cart-fab:active{transform:scale(.92)}
-  #cart-fab .fab-count{
-    position:absolute;top:-4px;right:-4px;
-    background:var(--accent2);color:#fff;
-    width:20px;height:20px;border-radius:50%;
-    font-size:11px;font-weight:700;
-    display:none;align-items:center;justify-content:center;
-  }
-  #cart-fab .fab-count.show{display:flex}
-
-  /* Menu back button in cart */
-  #cart-back-btn{
-    display:flex;align-items:center;gap:6px;
-    background:none;border:none;color:var(--accent);
-    font-size:14px;font-weight:600;cursor:pointer;padding:4px 0;
-    margin-bottom:4px;
-  }
-
-  /* Product grid - bigger touch targets */
-  .product-grid{
-    grid-template-columns:repeat(auto-fill,minmax(110px,1fr));
-    gap:8px;padding:10px;
-  }
-  .prod-img-placeholder{height:70px;font-size:28px}
-  .prod-info{padding:6px 8px}
-  .prod-name{font-size:11px}
-  .prod-card:hover{transform:none} /* disable hover transform on mobile */
-  .prod-card:active{transform:scale(.97)}
-
-  /* Cart items - touch friendly */
-  .cart-items{max-height:200px}
-  .qty-btn{width:32px;height:32px;font-size:16px!important}
-  .qty-val{font-size:14px!important;width:30px}
-  .checkout-btn{padding:16px;font-size:16px!important}
-
-  /* KDS */
-  .kds-layout{flex-direction:column;overflow-y:auto}
-  .kds-col{border-right:none;border-bottom:1px solid var(--border);min-height:200px;max-height:50vh;overflow:hidden}
-  .kds-col:last-child{border-bottom:none}
-
-  /* MODAL */
-  .modal{
-    position:fixed;bottom:0;left:0;right:0;top:auto;
-    border-radius:20px 20px 0 0;
-    max-height:92vh;max-width:100%;
-  }
-  .modal-overlay{align-items:flex-end;padding:0}
-
-  /* TABLE - horizontal scroll */
-  .table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
-  table{min-width:500px}
-
-  /* BUTTONS - bigger tap area */
-  .btn{padding:10px 16px;font-size:14px!important}
-  .btn-sm{padding:8px 14px;font-size:13px!important}
-  .btn-lg{padding:15px 24px;font-size:16px!important}
-
-  /* INPUTS */
-  .input{padding:12px 14px;font-size:16px!important}
-  .input-sm{padding:10px 12px;font-size:14px!important}
-
-  /* TOAST - bottom aware */
-  #toast-container{bottom:70px;right:12px;left:12px}
-  .toast{min-width:unset;width:100%}
-
-  /* SETTINGS TABS - scrollable */
-  .settings-tabs{overflow-x:auto;scrollbar-width:none;-webkit-overflow-scrolling:touch}
-  .settings-tabs::-webkit-scrollbar{display:none}
-  .settings-tab{white-space:nowrap;padding:12px 14px;font-size:12px!important}
-  .settings-content{padding:16px}
-
-  /* REPORT TABS */
-  .report-tabs{overflow-x:auto;flex-wrap:nowrap;-webkit-overflow-scrolling:touch;padding-bottom:4px;scrollbar-width:none}
-  .report-tabs::-webkit-scrollbar{display:none}
-  .report-tab{white-space:nowrap;flex-shrink:0}
-
-  /* HPP PAGE */
-  .form-row{flex-direction:column}
-  .form-row .input-group{min-width:unset}
-
-  /* Date filter */
-  .date-filter{flex-direction:column;align-items:stretch}
-  .date-filter input{width:100%!important}
-
-  /* Section header buttons - stack on small */
-  .section-header{flex-direction:column;align-items:flex-start}
-  .section-header>div:last-child{width:100%;display:flex;gap:8px}
-  .section-header .btn,.section-header button{flex:1}
-
-  /* Neraca big */
-  .neraca-big{font-size:22px}
-
-  /* Payment methods */
-  .payment-methods{grid-template-columns:1fr 1fr 1fr;gap:5px}
-  .pay-btn{padding:10px 4px;font-size:12px!important}
-
-  /* Order cards */
-  .order-card{padding:12px}
-  .oc-footer{gap:6px}
-
-  /* Dapur banner */
-  .dapur-banner{font-size:12px!important;padding:8px 12px}
-
-  /* HPP Kalkulasi tab scroll */
-  #page-hpp .page-scroll{padding:12px}
-
-  /* Alert */
-  .alert{font-size:12px!important}
-}
-
-/* Extra small phones */
-@media(max-width:380px){
-  .grid-4{grid-template-columns:1fr 1fr}
-  .product-grid{grid-template-columns:repeat(auto-fill,minmax(95px,1fr))}
-  .stat-value{font-size:18px}
-  .topbar-brand{font-size:13px}
-}
-
-/* Safe area for iPhone notch/home bar */
-@supports(padding:env(safe-area-inset-bottom)){
-  #bottom-nav{padding-bottom:env(safe-area-inset-bottom)}
-  .main{padding-bottom:calc(58px + env(safe-area-inset-bottom))}
-  #cart-fab{bottom:calc(68px + env(safe-area-inset-bottom))}
-  #toast-container{bottom:calc(70px + env(safe-area-inset-bottom))}
-}
-
-/* Hide bottom nav on desktop */
-@media(min-width:769px){
-  #bottom-nav{display:none!important}
-  #cart-fab{display:none!important}
-  #mobile-more-menu{display:none!important}
 }
 </style>
 </head>
@@ -1323,7 +1159,7 @@ input,select,textarea,button{font-size:16px!important} /* prevent iOS zoom on fo
   <div class="login-box">
     <div class="login-brand">SANA <span>FOOD</span></div>
     <div class="login-sub">Point of Sale · Versi Enhanced</div>
-    <div class="login-error" id="login-error" style="display:none"></div>
+    <div class="login-error" id="login-error">Username atau password salah!</div>
     <div class="login-group">
       <label class="login-label">Username</label>
       <input class="login-input" type="text" id="login-user" placeholder="Masukkan username" autocomplete="username">
@@ -1336,6 +1172,7 @@ input,select,textarea,button{font-size:16px!important} /* prevent iOS zoom on fo
       </div>
     </div>
     <button class="login-btn" onclick="doLogin()">MASUK</button>
+    
   </div>
 </div>
 
@@ -1346,6 +1183,8 @@ input,select,textarea,button{font-size:16px!important} /* prevent iOS zoom on fo
     <div class="topbar-right">
       <div class="topbar-time mono" id="topbar-clock">--:--:--</div>
       <span class="order-notify" id="ready-notify">!</span>
+      <span id="dapur-refresh-badge" style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#6fcf97;display:none;min-width:54px;text-align:right" title="Auto-refresh dapur"></span>
+      <button class="refresh-btn" id="soft-refresh-btn" onclick="softRefresh()" title="Refresh data (tanpa reload halaman)"><span class="ri">↻</span></button>
       <div class="topbar-role-badge" id="topbar-role">KASIR</div>
       <div class="topbar-user">
         <div class="user-avatar" id="user-avatar">A</div>
@@ -1365,48 +1204,12 @@ input,select,textarea,button{font-size:16px!important} /* prevent iOS zoom on fo
     <div class="nav-item" data-page="kds" onclick="showPage('kds')"><span class="nav-icon">🔥</span> Dapur (KDS)</div>
     <div class="nav-item" data-page="riwayat" onclick="showPage('riwayat')"><span class="nav-icon">📜</span> Riwayat</div>
     <div class="nav-item" data-page="titipan" onclick="showPage('titipan')"><span class="nav-icon">📦</span> Titipan</div>
+    <div class="nav-item admin-only" data-page="hpp" onclick="showPage('hpp')"><span class="nav-icon">🧮</span> HPP & Resep</div>
     <div class="nav-item admin-only" data-page="laporan" onclick="showPage('laporan')"><span class="nav-icon">📈</span> Laporan</div>
     <div class="nav-item admin-only" data-page="pengeluaran" onclick="showPage('pengeluaran')"><span class="nav-icon">💸</span> Pengeluaran</div>
     <div class="nav-item admin-only" data-page="neraca" onclick="showPage('neraca')"><span class="nav-icon">⚖️</span> Neraca & BEP</div>
     <div class="nav-item admin-only" data-page="settings" onclick="showPage('settings')"><span class="nav-icon">⚙️</span> Pengaturan</div>
   </div>
-
-  <!-- MOBILE BOTTOM NAV -->
-  <nav id="bottom-nav" style="display:none">
-    <div class="bn-item active" id="bn-dashboard" onclick="mobileNav('dashboard')">
-      <span class="bn-icon">📊</span><span class="bn-label">Dashboard</span>
-    </div>
-    <div class="bn-item" id="bn-kasir" onclick="mobileNav('kasir')">
-      <span class="bn-icon">🧾</span><span class="bn-label">Kasir</span>
-    </div>
-    <div class="bn-item" id="bn-kds" onclick="mobileNav('kds')">
-      <span class="bn-icon">🔥</span><span class="bn-label">Dapur</span>
-      <span class="bn-badge" id="bn-badge-kds"></span>
-    </div>
-    <div class="bn-item" id="bn-orders" onclick="mobileNav('orders')">
-      <span class="bn-icon">📋</span><span class="bn-label">Order</span>
-      <span class="bn-badge" id="bn-badge-orders"></span>
-    </div>
-    <div class="bn-item" id="bn-more" onclick="toggleMobileMore()">
-      <span class="bn-icon">☰</span><span class="bn-label">Lainnya</span>
-    </div>
-  </nav>
-
-  <!-- MOBILE MORE MENU -->
-  <div id="mobile-more-menu">
-    <div class="mm-item" onclick="mobileNav('riwayat');toggleMobileMore()"><span class="mm-icon">📜</span> Riwayat Order</div>
-    <div class="mm-item" onclick="mobileNav('titipan');toggleMobileMore()"><span class="mm-icon">📦</span> Titipan</div>
-    <div class="mm-item admin-only" onclick="mobileNav('laporan');toggleMobileMore()"><span class="mm-icon">📈</span> Laporan</div>
-    <div class="mm-item admin-only" onclick="mobileNav('pengeluaran');toggleMobileMore()"><span class="mm-icon">💸</span> Pengeluaran</div>
-    <div class="mm-item admin-only" onclick="mobileNav('neraca');toggleMobileMore()"><span class="mm-icon">⚖️</span> Neraca &amp; BEP</div>
-    <div class="mm-item admin-only" onclick="mobileNav('hpp');toggleMobileMore()"><span class="mm-icon">🧮</span> HPP &amp; Resep</div>
-    <div class="mm-item admin-only" onclick="mobileNav('settings');toggleMobileMore()"><span class="mm-icon">⚙️</span> Pengaturan</div>
-  </div>
-
-  <!-- CART FAB (mobile only) -->
-  <button id="cart-fab" style="display:none" onclick="toggleMobileCart()">
-    🛒<span class="fab-count" id="fab-count"></span>
-  </button>
 
   <!-- DAPUR NEW ORDER BANNER -->
   <div class="dapur-banner hidden" id="dapur-new-banner">
@@ -1470,7 +1273,6 @@ input,select,textarea,button{font-size:16px!important} /* prevent iOS zoom on fo
         </div>
         <div class="pos-cart">
           <div class="cart-header">
-            <button id="cart-back-btn" onclick="toggleMobileCart()" style="display:none">← Menu</button>
             <div class="cart-title">Keranjang <span style="color:var(--ink3);font-weight:400;font-size:13px" id="cart-count-label"></span></div>
           </div>
           <div class="cart-customer-row">
@@ -1764,6 +1566,81 @@ input,select,textarea,button{font-size:16px!important} /* prevent iOS zoom on fo
       </div>
     </div>
 
+    <!-- HPP & RESEP -->
+    <div class="page admin-only" id="page-hpp">
+      <div class="page-scroll">
+        <div class="section-header">
+          <div>
+            <div class="section-title">🧮 Kalkulator HPP & Resep</div>
+            <div class="section-sub">Hitung Harga Pokok Produksi per menu · Simulasi porsi dari stok bahan</div>
+          </div>
+          <div style="display:flex;gap:8px">
+            <button class="btn btn-secondary btn-sm" onclick="renderHpp()">↻ Refresh</button>
+            <button class="btn btn-primary" onclick="openResepModal(null)">+ Buat Resep Baru</button>
+          </div>
+        </div>
+
+        <div class="hpp-tabs">
+          <div class="hpp-tab active" onclick="switchHppTab('daftar',this)">📋 Daftar Resep</div>
+          <div class="hpp-tab" onclick="switchHppTab('kalkulator',this)">🧮 Kalkulator Porsi</div>
+          <div class="hpp-tab" onclick="switchHppTab('bahan',this)">🛒 Master Bahan Baku</div>
+          <div class="hpp-tab" onclick="switchHppTab('analisa',this)">📊 Analisa Margin</div>
+        </div>
+
+        <!-- TAB: DAFTAR RESEP -->
+        <div class="hpp-section active" id="htab-daftar">
+          <div class="grid-4" id="hpp-stat-cards" style="margin-bottom:16px"></div>
+          <div id="hpp-resep-list"></div>
+        </div>
+
+        <!-- TAB: KALKULATOR PORSI -->
+        <div class="hpp-section" id="htab-kalkulator">
+          <div class="grid-2" style="gap:16px">
+            <div class="card">
+              <div class="card-title">⚙️ Input Stok Bahan Tersedia</div>
+              <div class="input-group">
+                <label class="input-label">Pilih Resep</label>
+                <select class="input" id="kalk-resep-select" onchange="renderKalkulator()">
+                  <option value="">-- Pilih resep --</option>
+                </select>
+              </div>
+              <div id="kalk-bahan-inputs" style="margin-top:12px"></div>
+              <button class="btn btn-blue" style="margin-top:12px;width:100%" onclick="hitungPorsi()">🧮 Hitung Porsi</button>
+            </div>
+            <div class="card">
+              <div class="card-title">📦 Hasil Perhitungan Porsi</div>
+              <div id="kalk-result">
+                <div class="empty-state"><div class="empty-state-icon">🧮</div><div class="empty-state-text">Pilih resep dan isi stok bahan dahulu</div></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- TAB: MASTER BAHAN BAKU -->
+        <div class="hpp-section" id="htab-bahan">
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
+            <h3 style="font-size:15px;font-weight:700;flex:1">Daftar Bahan Baku & Harga</h3>
+            <button class="btn btn-primary btn-sm" onclick="openBahanModal(null)">+ Tambah Bahan</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Nama Bahan</th><th>Satuan</th><th>Harga per Satuan</th><th>Kategori</th><th>Stok Tersedia</th><th>Aksi</th></tr></thead>
+              <tbody id="bahan-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- TAB: ANALISA MARGIN -->
+        <div class="hpp-section" id="htab-analisa">
+          <div class="alert alert-info" style="margin-bottom:16px">
+            💡 Analisa margin menunjukkan selisih antara Harga Jual dengan HPP. Margin ideal minimal <strong>40%</strong> untuk usaha kuliner.
+          </div>
+          <div id="analisa-margin-list"></div>
+        </div>
+
+      </div>
+    </div>
+
   </div><!-- /main -->
 </div><!-- /app -->
 
@@ -1784,16 +1661,17 @@ input,select,textarea,button{font-size:16px!important} /* prevent iOS zoom on fo
   <div class="modal" style="max-width:380px">
     <div class="modal-header"><div class="modal-title">Struk Pembayaran</div><button class="close-btn" onclick="closeStruk()">✕</button></div>
     <div class="modal-body" id="struk-content"></div>
-    <div class="modal-footer">
-      <button class="btn btn-secondary" onclick="printStruk()">🖨 Print</button>
-      <button class="btn btn-primary" onclick="closeStruk()">Tutup</button>
+    <div class="modal-footer" id="struk-footer">
+      <!-- Tombol diisi dinamis oleh showStruk() berdasarkan role -->
     </div>
   </div>
 </div>
 
 <script>
-// Firebase aktif — semua data dari Firestore
-const demoMode = false;
+// =============================================
+// FIREBASE CONFIG (via module di atas)
+// =============================================
+const demoMode = false; // Firebase aktif
 
 // =============================================
 // GLOBALS
@@ -1818,11 +1696,50 @@ let kdsInterval = null;
 let pendingDapurNotif = 0;
 let lastKnownOrderCount = 0;
 let outletSettings = { nama:'Sana Food', tagline:'', alamat:'', telp:'', header:'', footer:'Terima kasih sudah makan di Sana Food! 🍳' };
-let bahanData = [];
-let resepData = [];
 
-// Demo data dihapus — semua data diambil dari Firestore
-// Variabel diinisialisasi kosong di GLOBALS di atas
+// =============================================
+// DEMO DATA
+// =============================================
+let demoMenu = [
+  {id:'m1',nama:'Nasi Goreng Spesial',harga:20000,categoryId:'c1',tersedia:true,urutan:1,emoji:'🍳'},
+  {id:'m2',nama:'Mie Goreng',harga:18000,categoryId:'c1',tersedia:true,urutan:2,emoji:'🍜'},
+  {id:'m3',nama:'Ayam Geprek',harga:22000,categoryId:'c2',tersedia:true,urutan:3,emoji:'🍗'},
+  {id:'m4',nama:'Ayam Bakar',harga:25000,categoryId:'c2',tersedia:true,urutan:4,emoji:'🍖'},
+  {id:'m5',nama:'Nasi Putih',harga:5000,categoryId:'c1',tersedia:true,urutan:5,emoji:'🍚'},
+  {id:'m6',nama:'Mie Rebus',harga:16000,categoryId:'c1',tersedia:true,urutan:6,emoji:'🍜'},
+  {id:'m7',nama:'Capcay',harga:18000,categoryId:'c2',tersedia:true,urutan:7,emoji:'🥦'},
+  {id:'m8',nama:'Soto Ayam',harga:17000,categoryId:'c1',tersedia:true,urutan:8,emoji:'🍲'},
+  {id:'m9',nama:'Es Teh Manis',harga:5000,categoryId:'c3',tersedia:true,urutan:9,emoji:'🧋'},
+  {id:'m10',nama:'Es Jeruk',harga:7000,categoryId:'c3',tersedia:true,urutan:10,emoji:'🍊'},
+  {id:'m11',nama:'Air Mineral',harga:4000,categoryId:'c3',tersedia:true,urutan:11,emoji:'💧'},
+];
+let demoCats = [
+  {id:'c1',nama:'🍚 Makanan Berat',urutan:1},
+  {id:'c2',nama:'🍗 Lauk Pauk',urutan:2},
+  {id:'c3',nama:'🧊 Minuman',urutan:3},
+  {id:'titipan',nama:'📦 Titipan',urutan:4},
+];
+let demoUsers = [
+  {id:'u1',username:'admin',password:'admin123',nama:'Admin',role:'admin',aktif:true},
+  {id:'u2',username:'kasir1',password:'kasir123',nama:'Kasir 1',role:'kasir',aktif:true},
+  {id:'u3',username:'dapur1',password:'dapur123',nama:'Dapur 1',role:'dapur',aktif:true},
+];
+
+// Titipan demo data
+let demoTitipan = [
+  {id:'t1',nama:'Kue Lapis Bu Sari',emoji:'🎂',harga:8000,penitip:'Bu Sari',teleponPenitip:'0812-3456',stok:15,stokAwal:20,categoryId:'titipan',tersedia:true,createdAt:new Date(Date.now()-3*86400000),hargaBeli:5000},
+  {id:'t2',nama:'Risoles Goreng',emoji:'🥟',harga:5000,penitip:'Pak Budi',teleponPenitip:'0813-9999',stok:8,stokAwal:20,categoryId:'titipan',tersedia:true,createdAt:new Date(Date.now()-1*86400000),hargaBeli:3000},
+  {id:'t3',nama:'Onde-Onde',emoji:'🟡',harga:4000,penitip:'Bu Sari',teleponPenitip:'0812-3456',stok:0,stokAwal:10,categoryId:'titipan',tersedia:false,createdAt:new Date(Date.now()-2*86400000),hargaBeli:2500},
+];
+let demoTitipanLog = [];
+
+// Expenses demo data
+let demoExpenses = [
+  {id:'e1',tanggal:new Date().toISOString().slice(0,10),kategori:'gaji',deskripsi:'Gaji Kasir Bulan Ini',periode:'bulanan',nominal:1500000,createdBy:'Admin',createdAt:new Date()},
+  {id:'e2',tanggal:new Date().toISOString().slice(0,10),kategori:'listrik',deskripsi:'Tagihan Listrik',periode:'bulanan',nominal:350000,createdBy:'Admin',createdAt:new Date()},
+  {id:'e3',tanggal:new Date().toISOString().slice(0,10),kategori:'air',deskripsi:'Tagihan Air',periode:'bulanan',nominal:120000,createdBy:'Admin',createdAt:new Date()},
+  {id:'e4',tanggal:new Date().toISOString().slice(0,10),kategori:'sampah',deskripsi:'Retribusi Sampah',periode:'bulanan',nominal:50000,createdBy:'Admin',createdAt:new Date()},
+];
 
 const EXP_CATEGORIES = {
   gaji:{label:'Gaji',icon:'👤',cls:'exp-gaji'},
@@ -1832,6 +1749,26 @@ const EXP_CATEGORIES = {
   keamanan:{label:'Keamanan',icon:'🔒',cls:'exp-keamanan'},
   lainnya:{label:'Lainnya',icon:'📌',cls:'exp-lainnya'},
 };
+
+function seedDemoOrders() {
+  const now = Date.now(), min = 60000, hr = 3600000;
+  demoOrderSeq = 1;
+  demoOrders = [
+    _mkOrder({items:[{menuId:'m1',nama:'Nasi Goreng Spesial',qty:2,harga:20000,catatan:''},{menuId:'m9',nama:'Es Teh Manis',qty:2,harga:5000,catatan:''}],customer:'Meja 3',pm:'tunai',status:'done',createdAt:new Date(now-2*hr),readyAt:new Date(now-2*hr+12*min),doneAt:new Date(now-2*hr+13*min)}),
+    _mkOrder({items:[{menuId:'m3',nama:'Ayam Geprek',qty:1,harga:22000,catatan:'Ekstra pedas'},{menuId:'m5',nama:'Nasi Putih',qty:1,harga:5000,catatan:''}],customer:'Budi',pm:'qris',status:'done',createdAt:new Date(now-1.5*hr),readyAt:new Date(now-1.5*hr+10*min),doneAt:new Date(now-1.5*hr+11*min)}),
+    _mkOrder({items:[{menuId:'t1',nama:'Kue Lapis Bu Sari',qty:2,harga:8000,catatan:'',titipanId:'t1'},{menuId:'m9',nama:'Es Teh Manis',qty:2,harga:5000,catatan:''}],customer:'Andi',pm:'tunai',status:'done',createdAt:new Date(now-1*hr),readyAt:new Date(now-1*hr+5*min),doneAt:new Date(now-1*hr+6*min)}),
+    _mkOrder({items:[{menuId:'m2',nama:'Mie Goreng',qty:1,harga:18000,catatan:'Tidak pedas'},{menuId:'m11',nama:'Air Mineral',qty:1,harga:4000,catatan:''}],customer:'Meja 1',pm:'transfer',status:'cooking',createdAt:new Date(now-8*min)}),
+    _mkOrder({items:[{menuId:'m4',nama:'Ayam Bakar',qty:2,harga:25000,catatan:''},{menuId:'t2',nama:'Risoles Goreng',qty:3,harga:5000,catatan:'',titipanId:'t2'},{menuId:'m9',nama:'Es Teh Manis',qty:2,harga:5000,catatan:''}],customer:'Sari',pm:'tunai',status:'ready',createdAt:new Date(now-15*min),readyAt:new Date(now-5*min)}),
+  ];
+  // seed titipan log dari order selesai yang punya item titipan
+  demoOrders.filter(o=>o.status==='done').forEach(o=>{
+    o.items.forEach(i=>{
+      if(i.titipanId){
+        demoTitipanLog.push({id:'tl'+Date.now()+Math.random(),titipanId:i.titipanId,orderId:o.id,orderNum:o.orderNum,qty:i.qty,waktu:o.doneAt||o.createdAt,kasir:o.kasir,tipe:'jual'});
+      }
+    });
+  });
+}
 
 function _mkOrder(o) {
   const total = o.items.reduce((s,i)=>s+i.qty*i.harga,0);
@@ -1887,14 +1824,8 @@ function startClock() {
 window.togglePwd=function(){ const el=document.getElementById('login-pass'); el.type=el.type==='password'?'text':'password'; };
 
 window.doLogin=function(){
-  // Ditangani oleh Firebase module di atas (script type="module")
-  // Tunggu module selesai load, jangan tampilkan error dulu
-  setTimeout(function(){
-    if(window._firebaseModuleReady) return; // module sudah handle
-    const errEl=document.getElementById('login-error');
-    errEl.textContent='Menghubungkan ke database...';
-    errEl.style.display='block';
-  }, 500);
+  // Override oleh Firebase module — fungsi ini tidak dipakai
+  console.warn('doLogin dipanggil dari script lama, harusnya Firebase module yang handle');
 };
 
 window.doLogout=function(){
@@ -1904,6 +1835,7 @@ window.doLogout=function(){
 };
 window.confirmLogout=function(){
   closeModal(); if(clockInterval)clearInterval(clockInterval); if(kdsInterval)clearInterval(kdsInterval);
+  stopDapurAutoRefresh();
   currentUser=null; cart=[]; sessionStorage.removeItem('sana_food_user');
   document.getElementById('login-screen').classList.remove('hidden');
   document.getElementById('app').style.display='none';
@@ -1932,19 +1864,25 @@ function afterLogin(){
     }
   });
   
-  // Data sudah diload dari Firestore sebelum afterLogin dipanggil
-  // TIDAK menggunakan demo data sama sekali
+  // Data sudah di-load dari Firestore oleh loadAllDataFromFirestore() sebelum afterLogin dipanggil
+  // TIDAK menggunakan demo data sama sekali — hanya pakai data dari database
   activeOrders = demoOrders.filter(o => o.status === 'cooking' || o.status === 'ready');
-  
+
   // Tracking order count untuk dapur (deteksi order baru)
   lastKnownOrderCount = activeOrders.length;
-  
+
   startClock();
   if(isDapur){
     showPage('kds');
-    // Auto-refresh KDS setiap 10 detik untuk dapur
-    kdsInterval = setInterval(()=>{ checkNewOrdersForDapur(); renderKds(); updateOrderBadge(); },10000);
+    const badge = document.getElementById('dapur-refresh-badge');
+    if(badge) badge.style.display = '';
+    kdsInterval = setInterval(()=>{ checkNewOrdersForDapur(); },10000);
+    startDapurAutoRefresh();
   } else {
+    const badge = document.getElementById('dapur-refresh-badge');
+    if(badge) badge.style.display = 'none';
+    renderCatFilter();
+    renderMenuGrid();
     showPage('dashboard');
     setInterval(()=>{ renderActiveOrders(); renderKds(); updateOrderBadge(); },30000);
   }
@@ -1965,6 +1903,7 @@ function showPage(name){
   if(name==='titipan') renderTitipan();
   if(name==='pengeluaran'){setExpRange('month');renderPengeluaran();}
   if(name==='neraca'){setNeracaRange('month');}
+  if(name==='hpp'){renderHpp();}
 }
 window.showPage=showPage;
 
@@ -2121,6 +2060,8 @@ window.submitOrder=async function(){
     }
   }
   showLoading(true,'Memproses order...');
+  // Beri waktu 1 frame agar loading overlay ter-render sebelum eksekusi sinkron berat
+  await new Promise(r => setTimeout(r, 30));
   try {
     const seq=demoOrders.filter(o=>o.createdAt.toISOString().slice(0,10)===today()).length+1;
     const orderNum='#'+String(seq).padStart(3,'0');
@@ -2186,9 +2127,58 @@ function showStruk(order){
     <div class="receipt-line"></div>
     <div class="receipt-center" style="font-size:11px">${s.footer||'Terima kasih! 🍳'}</div>
   </div>`;
+
+  // Tombol berbeda berdasarkan role
+  const footer = document.getElementById('struk-footer');
+  const isKasir = currentUser && currentUser.role === 'kasir';
+  const isAdmin = currentUser && currentUser.role === 'admin';
+  if(isKasir || isAdmin){
+    footer.innerHTML=`
+      <button class="btn btn-secondary" onclick="kirimStruKeDapur('${order.id}')">🔔 Kirim Notif ke Dapur</button>
+      <button class="btn btn-success" onclick="selesaikanOrder('${order.id}')">✅ Selesaikan Order</button>`;
+  } else {
+    // Role dapur atau lainnya: tombol standar
+    footer.innerHTML=`
+      <button class="btn btn-secondary" onclick="printStruk()">🖨 Print</button>
+      <button class="btn btn-primary" onclick="closeStruk()">Tutup</button>`;
+  }
+
   document.getElementById('struk-overlay').classList.remove('hidden');
 }
+
 window.printStruk=function(){document.getElementById('print-area').innerHTML=document.getElementById('struk-content').innerHTML;window.print();};
+
+window.kirimStruKeDapur=function(orderId){
+  const order=demoOrders.find(o=>o.id===orderId);
+  if(!order){toast('Order tidak ditemukan','error');return;}
+  // Tandai order sudah dikirim ke dapur (notifikasi, bukan cetak)
+  order._isNew=true;
+  order._sentToDapur=true;
+  pendingDapurNotif++;
+  playSound('new');
+  closeStruk();
+  // Tampilkan banner dapur jika sedang di halaman dapur
+  const banner=document.getElementById('dapur-new-banner');
+  const countEl=document.getElementById('dapur-new-count');
+  if(banner&&countEl){
+    countEl.textContent=pendingDapurNotif;
+    banner.classList.remove('hidden');
+    setTimeout(()=>banner.classList.add('hidden'),8000);
+  }
+  renderKds(); updateOrderBadge();
+  toast(`Notifikasi order ${order.orderNum} dikirim ke dapur! 🔔`,'success');
+};
+
+window.selesaikanOrder=function(orderId){
+  const idx=demoOrders.findIndex(o=>o.id===orderId);
+  if(idx<0){toast('Order tidak ditemukan','error');return;}
+  demoOrders[idx].status='done';
+  demoOrders[idx].doneAt=new Date();
+  activeOrders=demoOrders.filter(o=>o.status==='cooking'||o.status==='ready');
+  closeStruk();
+  renderActiveOrders(); renderKds(); updateOrderBadge(); loadDashboard();
+  toast(`Order ${demoOrders[idx].orderNum} diselesaikan! ✅`,'success');
+};
 
 // =============================================
 // ACTIVE ORDERS
@@ -2231,7 +2221,7 @@ window.updateOrderStatus=function(id,status){
   }
   activeOrders=demoOrders.filter(o=>o.status==='cooking'||o.status==='ready');
   renderActiveOrders(); renderKds(); updateOrderBadge(); loadDashboard();
-  toast(status==='ready'?'Order siap saji! ✅':status==='done'?'Order selesai — struk dapur dicetak 🖨':status==='cancelled'?'Order dibatalkan':'Order diperbarui','success');
+  toast(status==='ready'?'Order siap saji! ✅':status==='done'?(currentUser.role==='dapur'?'Order selesai — 2 struk dicetak 🖨':'Order selesai! ✅'):status==='cancelled'?'Order dibatalkan':'Order diperbarui','success');
 };
 
 // =============================================
@@ -2271,21 +2261,9 @@ function renderKds(){
 // =============================================
 // RIWAYAT
 // =============================================
+// loadRiwayat — override oleh Firebase module
 window.loadRiwayat=function(){
-  const date=document.getElementById('riwayat-date').value;
-  const el=document.getElementById('riwayat-list');
-  const orders=demoOrders.filter(o=>new Date(o.createdAt).toISOString().slice(0,10)===date);
-  if(!orders.length){el.innerHTML='<div class="empty-state"><div class="empty-state-icon">📜</div><div class="empty-state-text">Tidak ada order pada tanggal ini</div></div>';return;}
-  el.innerHTML=orders.map(o=>{
-    const badgeClass={done:'badge-done',cancelled:'badge-cancelled',ready:'badge-ready',cooking:'badge-cooking'}[o.status]||'badge-cooking';
-    const badgeLabel={done:'✓ Selesai',cancelled:'✕ Batal',ready:'✅ Siap',cooking:'🍳 Memasak'}[o.status]||'';
-    const time=new Date(o.createdAt);
-    return `<div class="order-card">
-      <div class="oc-header"><span class="oc-num">${o.orderNum||'-'}</span><span class="oc-name">${o.customer||'—'}</span><span class="${badgeClass}">${badgeLabel}</span></div>
-      <div class="oc-items">${o.items.map(i=>`${i.qty}× ${i.nama}${i.isTitipan?' 📦':''}`).join(', ')}</div>
-      <div class="oc-footer"><span class="oc-total">${fmt(o.total)}</span><span class="oc-method">${o.paymentMethod.toUpperCase()}</span><span class="oc-time">${time.toLocaleTimeString('id-ID',{hour:'2-digit',minute:'2-digit'})}</span><span>Kasir: ${o.kasir||'-'}</span></div>
-    </div>`;
-  }).join('');
+  document.getElementById('riwayat-list').innerHTML='<div class="empty-state"><div class="spinner"></div></div>';
 };
 
 // =============================================
@@ -2870,25 +2848,52 @@ window.openMenuModal=function(menuId){
     </div>`,
     `<button class="btn btn-secondary" onclick="closeModal()">Batal</button><button class="btn btn-primary" onclick="saveMenu('${menuId||''}')">Simpan</button>`);
 };
-window.saveMenu=function(menuId){
-  const nama=document.getElementById('m-nama').value.trim(); const harga=parseInt(document.getElementById('m-harga').value)||0;
-  if(!nama||!harga){toast('Isi nama dan harga!','warn');return;}
-  const data={nama,harga,categoryId:document.getElementById('m-cat').value,emoji:document.getElementById('m-emoji').value||'🍽',tersedia:document.getElementById('m-status').value==='1',urutan:menuItems.length+1};
-  if(menuId){const idx=menuItems.findIndex(m=>m.id===menuId);if(idx>=0)Object.assign(menuItems[idx],data);}
-  else menuItems.push({id:'m'+Date.now(),...data});
-  closeModal(); renderMenuGrid(); renderSettingsMenu(); toast('Menu disimpan!','success');
-};
+window.saveMenu=function(menuId){toast('Menghubungi database...','info');}; // Override by Firebase module
 window.deleteMenu=function(menuId){const m=menuItems.find(x=>x.id===menuId);openModal('Hapus Menu',`<p style="font-size:14px;color:var(--ink2)">Hapus menu <strong style="color:var(--accent)">${m?.nama}</strong>?</p>`,`<button class="btn btn-secondary" onclick="closeModal()">Batal</button><button class="btn btn-danger" onclick="confirmDeleteMenu('${menuId}')">Hapus</button>`);};
-window.confirmDeleteMenu=function(menuId){menuItems=menuItems.filter(m=>m.id!==menuId);closeModal();renderMenuGrid();renderSettingsMenu();toast('Dihapus','warn');};
+window.confirmDeleteMenu=function(menuId){toast('Menghubungi database...','info');}; // Override by Firebase module
 window.openCatModal=function(catId){const c=catId?categories.find(x=>x.id===catId):null;openModal(c?'Edit Kategori':'Tambah Kategori',`<div class="input-group"><label class="input-label">Nama Kategori</label><input class="input" id="c-nama" value="${c?.nama||''}"></div>`,`<button class="btn btn-secondary" onclick="closeModal()">Batal</button><button class="btn btn-primary" onclick="saveCat('${catId||''}')">Simpan</button>`);};
-window.saveCat=function(catId){const nama=document.getElementById('c-nama').value.trim();if(!nama){toast('Isi nama!','warn');return;}if(catId){const idx=categories.findIndex(c=>c.id===catId);if(idx>=0)categories[idx].nama=nama;}else categories.push({id:'c'+Date.now(),nama,urutan:categories.length+1});closeModal();renderCatFilter();renderSettingsCat();toast('Kategori disimpan!','success');};
+window.saveCat=function(catId){toast('Menghubungi database...','info');}; // Override by Firebase module
 window.deleteCat=function(catId){const c=categories.find(x=>x.id===catId);openModal('Hapus Kategori',`<p style="font-size:14px">Hapus <strong>${c?.nama}</strong>?</p>`,`<button class="btn btn-secondary" onclick="closeModal()">Batal</button><button class="btn btn-danger" onclick="confirmDeleteCat('${catId}')">Hapus</button>`);};
-window.confirmDeleteCat=function(catId){categories=categories.filter(c=>c.id!==catId);closeModal();renderCatFilter();renderSettingsCat();toast('Dihapus','warn');};
+window.confirmDeleteCat=function(catId){toast('Menghubungi database...','info');}; // Override by Firebase module
 window.openUserModal=function(userId){const u=userId?users.find(x=>x.id===userId):null;openModal(u?'Edit User':'Tambah User',`<div class="input-group"><label class="input-label">Nama</label><input class="input" id="u-nama" value="${u?.nama||''}"></div><div class="input-group"><label class="input-label">Username</label><input class="input" id="u-username" value="${u?.username||''}"></div><div class="input-group"><label class="input-label">Password${u?' (kosong = tidak berubah)':''}</label><input class="input" type="password" id="u-pass"></div><div class="input-group"><label class="input-label">Role</label><select class="input" id="u-role"><option value="kasir" ${u?.role==='kasir'?'selected':''}>Kasir</option><option value="dapur" ${u?.role==='dapur'?'selected':''}>Dapur</option><option value="admin" ${u?.role==='admin'?'selected':''}>Admin</option></select></div>`,`<button class="btn btn-secondary" onclick="closeModal()">Batal</button><button class="btn btn-primary" onclick="saveUser('${userId||''}')">Simpan</button>`);};
 window.saveUser=function(userId){const nama=document.getElementById('u-nama').value.trim();const username=document.getElementById('u-username').value.trim();const pass=document.getElementById('u-pass').value;const role=document.getElementById('u-role').value;if(!nama||!username){toast('Isi nama dan username!','warn');return;}const data={nama,username,role,aktif:true};if(pass)data.password=pass;if(userId){const idx=users.findIndex(u=>u.id===userId);if(idx>=0)Object.assign(users[idx],data);}else users.push({id:'u'+Date.now(),password:pass||'',...data});closeModal();renderSettingsUsers();toast('User disimpan!','success');};
 window.deleteUser=function(userId){const u=users.find(x=>x.id===userId);openModal('Hapus User',`<p>Hapus <strong>${u?.nama}</strong>?</p>`,`<button class="btn btn-secondary" onclick="closeModal()">Batal</button><button class="btn btn-danger" onclick="confirmDeleteUser('${userId}')">Hapus</button>`);};
 window.confirmDeleteUser=function(userId){users=users.filter(u=>u.id!==userId);closeModal();renderSettingsUsers();toast('Dihapus','warn');};
 window.saveOutletSettings=function(){outletSettings={nama:document.getElementById('s-nama').value,tagline:document.getElementById('s-tagline').value,alamat:document.getElementById('s-alamat').value,telp:document.getElementById('s-telp').value,header:document.getElementById('s-header').value,footer:document.getElementById('s-footer').value};toast('Pengaturan disimpan!','success');};
+
+// =============================================
+// SOFT REFRESH
+// =============================================
+window.softRefresh = async function(){
+  const btn = document.getElementById('soft-refresh-btn');
+  if(btn) btn.classList.add('spinning');
+  showLoading(true,'Memuat ulang data...');
+  await new Promise(r => setTimeout(r, 400)); // animasi biar keliatan
+  try {
+    // Reset data order aktif
+    activeOrders = demoOrders.filter(o=>o.status==='cooking'||o.status==='ready');
+    // Refresh halaman yang sedang aktif
+    const activePage = document.querySelector('.page.active');
+    if(activePage){
+      const pageId = activePage.id.replace('page-','');
+      if(pageId==='kasir'){ renderMenuGrid(); renderCatFilter(); renderCart(); }
+      else if(pageId==='dashboard') loadDashboard();
+      else if(pageId==='orders') renderActiveOrders();
+      else if(pageId==='kds') renderKds();
+      else if(pageId==='riwayat') loadRiwayat();
+      else if(pageId==='titipan') renderTitipan();
+      else if(pageId==='laporan') loadLaporan();
+      else if(pageId==='pengeluaran') renderPengeluaran();
+      else if(pageId==='settings'){ renderSettingsMenu(); renderSettingsCat(); renderSettingsUsers(); }
+    }
+    updateOrderBadge();
+    toast('Data diperbarui ✓','success');
+  } catch(e){ toast('Gagal refresh: '+e.message,'error'); }
+  finally{
+    showLoading(false);
+    if(btn){ setTimeout(()=>btn.classList.remove('spinning'),200); }
+  }
+};
 
 // =============================================
 // SOUND
@@ -2909,35 +2914,72 @@ window.printThermalDapur = function(order){
   const s = outletSettings;
   const timeStr = new Date(order.createdAt).toLocaleTimeString('id-ID',{hour:'2-digit',minute:'2-digit'});
   const dateStr = new Date(order.createdAt).toLocaleDateString('id-ID',{day:'2-digit',month:'short',year:'numeric'});
+  const doneTime = new Date().toLocaleTimeString('id-ID',{hour:'2-digit',minute:'2-digit'});
   
   const itemsHtml = order.items.map(i=>`
     <div class="thermal-item">
-      <span class="thermal-qty">${i.qty}×</span>
-      <span class="thermal-name">${i.nama}${i.isTitipan?' 📦':''}</span>
+      <span class="thermal-qty">${i.qty}\u00d7</span>
+      <span class="thermal-name">${i.nama}${i.isTitipan?' \ud83d\udce6':''}</span>
     </div>
-    ${i.catatan?`<div class="thermal-note">📝 ${i.catatan}</div>`:''}`).join('');
-  
-  const content = `<div class="thermal-receipt">
+    ${i.catatan?`<div class="thermal-note">\ud83d\udcdd ${i.catatan}</div>`:''}`).join('');
+
+  const itemsPriceHtml = order.items.map(i=>`
+    <div class="thermal-item" style="justify-content:space-between">
+      <span><span class="thermal-qty">${i.qty}\u00d7</span> ${i.nama}</span>
+      <span style="font-family:monospace">${fmt(i.qty*i.harga)}</span>
+    </div>`).join('');
+
+  // STRUK 1: Pelanggan
+  const struk1 = `<div class="thermal-receipt">
+    <div class="thermal-header">
+      <div style="font-size:11px;color:#555">${s.nama||'Sana Food'}</div>
+      ${s.tagline?`<div style="font-size:10px;color:#777">${s.tagline}</div>`:''}
+      <div class="thermal-divider-thin"></div>
+      <div class="thermal-order-num">${order.orderNum}</div>
+      ${order.customer?`<div class="thermal-cust">\ud83d\udc64 ${order.customer}</div>`:''}
+      <div class="thermal-time">${dateStr} \u00b7 ${timeStr}</div>
+    </div>
+    <div class="thermal-divider"></div>
+    <div style="font-size:10px;font-weight:700;letter-spacing:1px;text-align:center;margin-bottom:6px">\u2014 PESANAN \u2014</div>
+    ${itemsHtml}
+    <div class="thermal-divider"></div>
+    <div style="display:flex;justify-content:space-between;font-size:12px;font-weight:700">
+      <span>TOTAL</span><span>${fmt(order.total)}</span>
+    </div>
+    <div style="font-size:10px;margin-top:4px">Metode: ${(order.paymentMethod||'').toUpperCase()}</div>
+    <div class="thermal-divider"></div>
+    <div class="thermal-footer">
+      Kasir: ${order.kasir||'\u2014'} \u00b7 Selesai: ${doneTime}
+    </div>
+    <div style="font-size:10px;text-align:center;margin-top:6px;color:#555">${s.footer||'Terima kasih! \ud83c\udf73'}</div>
+    <div style="font-size:9px;text-align:center;margin-top:8px;letter-spacing:2px;border:1px dashed #ccc;padding:3px">STRUK PELANGGAN</div>
+  </div>`;
+
+  // STRUK 2: Pembukuan (dengan rincian harga)
+  const struk2 = `<div class="thermal-receipt" style="border-top:3px dashed #000;margin-top:12px;padding-top:12px">
     <div class="thermal-header">
       <div style="font-size:11px;color:#555">${s.nama||'Sana Food'}</div>
       <div class="thermal-divider-thin"></div>
       <div class="thermal-order-num">${order.orderNum}</div>
-      ${order.customer?`<div class="thermal-cust">👤 ${order.customer}</div>`:''}
-      <div class="thermal-time">${dateStr} · ${timeStr}</div>
+      <div class="thermal-time">${dateStr} \u00b7 ${timeStr}</div>
+      ${order.customer?`<div style="font-size:10px">\ud83d\udc64 ${order.customer}</div>`:''}
     </div>
     <div class="thermal-divider"></div>
-    <div style="font-size:10px;font-weight:700;letter-spacing:1px;text-align:center;margin-bottom:6px">— PESANAN —</div>
-    ${itemsHtml}
+    <div style="font-size:10px;font-weight:700;letter-spacing:1px;text-align:center;margin-bottom:6px">\u2014 RINCIAN PEMBUKUAN \u2014</div>
+    ${itemsPriceHtml}
     <div class="thermal-divider"></div>
-    <div class="thermal-footer">
-      Kasir: ${order.kasir||'—'}<br>
-      ✅ SELESAI — ${new Date().toLocaleTimeString('id-ID',{hour:'2-digit',minute:'2-digit'})}
+    <div style="display:flex;justify-content:space-between;font-size:12px;font-weight:700">
+      <span>TOTAL</span><span>${fmt(order.total)}</span>
     </div>
+    <div style="font-size:10px;margin-top:4px">Metode: ${(order.paymentMethod||'').toUpperCase()}</div>
+    <div style="font-size:10px">Kasir: ${order.kasir||'\u2014'}</div>
+    <div style="font-size:10px">Selesai: ${doneTime}</div>
+    <div style="font-size:9px;text-align:center;margin-top:8px;letter-spacing:2px;border:1px dashed #ccc;padding:3px">STRUK PEMBUKUAN</div>
   </div>`;
   
-  document.getElementById('print-area').innerHTML = content;
+  document.getElementById('print-area').innerHTML = struk1 + struk2;
   window.print();
-  toast('Struk dapur dicetak! 🖨','success');
+  toast('2 struk dicetak: Pelanggan & Pembukuan \ud83d\udda8','success');
 };
 
 // Cek order baru untuk notifikasi dapur
@@ -2961,6 +3003,510 @@ function checkNewOrdersForDapur(){
 }
 
 // =============================================
+// AUTO REFRESH DAPUR
+// =============================================
+let dapurAutoRefreshInterval = null;
+let dapurCountdownInterval = null;
+const DAPUR_REFRESH_SECONDS = 3 * 60; // 3 menit
+let dapurCountdown = DAPUR_REFRESH_SECONDS;
+
+function startDapurAutoRefresh(){
+  stopDapurAutoRefresh();
+  dapurCountdown = DAPUR_REFRESH_SECONDS;
+
+  // Countdown tick setiap detik
+  dapurCountdownInterval = setInterval(()=>{
+    dapurCountdown--;
+    updateDapurCountdownUI();
+    if(dapurCountdown <= 0) dapurCountdown = DAPUR_REFRESH_SECONDS;
+  }, 1000);
+
+  // Refresh data setiap 3 menit
+  dapurAutoRefreshInterval = setInterval(()=>{
+    dapurCountdown = DAPUR_REFRESH_SECONDS;
+    const prevCookingIds = activeOrders.filter(o=>o.status==='cooking').map(o=>o.id).join(',');
+    activeOrders = demoOrders.filter(o=>o.status==='cooking'||o.status==='ready');
+    const newCookingIds = activeOrders.filter(o=>o.status==='cooking').map(o=>o.id).join(',');
+    renderKds();
+    updateOrderBadge();
+    // Cek apakah ada order baru sejak refresh terakhir
+    if(newCookingIds !== prevCookingIds){
+      checkNewOrdersForDapur();
+    }
+    // Toast diam-diam tanpa ganggu
+    const el = document.getElementById('dapur-refresh-badge');
+    if(el){ el.textContent = '✓'; el.style.color='var(--accent3)'; setTimeout(()=>{ el.textContent=''; }, 2000); }
+  }, DAPUR_REFRESH_SECONDS * 1000);
+
+  updateDapurCountdownUI();
+}
+
+function stopDapurAutoRefresh(){
+  if(dapurAutoRefreshInterval){ clearInterval(dapurAutoRefreshInterval); dapurAutoRefreshInterval=null; }
+  if(dapurCountdownInterval){ clearInterval(dapurCountdownInterval); dapurCountdownInterval=null; }
+  const el = document.getElementById('dapur-refresh-badge');
+  if(el) el.textContent = '';
+}
+
+function updateDapurCountdownUI(){
+  const el = document.getElementById('dapur-refresh-badge');
+  if(!el) return;
+  const m = Math.floor(dapurCountdown/60);
+  const s = String(dapurCountdown%60).padStart(2,'0');
+  el.textContent = `🔄 ${m}:${s}`;
+}
+
+// =============================================
+// HPP & RESEP DATA
+// =============================================
+let demoBahan = [
+  {id:'b1',nama:'Beras',satuan:'gram',harga:14,kategori:'bahan_pokok',stok:5000},
+  {id:'b2',nama:'Minyak Goreng',satuan:'ml',harga:0.018,kategori:'bahan_pokok',stok:3000},
+  {id:'b3',nama:'Telur Ayam',satuan:'butir',harga:2000,kategori:'protein',stok:30},
+  {id:'b4',nama:'Ayam Fillet',satuan:'gram',harga:35,kategori:'protein',stok:2000},
+  {id:'b5',nama:'Kecap Manis',satuan:'ml',harga:0.05,kategori:'bumbu',stok:1000},
+  {id:'b6',nama:'Bawang Merah',satuan:'gram',harga:20,kategori:'bumbu',stok:500},
+  {id:'b7',nama:'Bawang Putih',satuan:'gram',harga:22,kategori:'bumbu',stok:500},
+  {id:'b8',nama:'Mie Kering',satuan:'gram',harga:12,kategori:'bahan_pokok',stok:3000},
+  {id:'b9',nama:'Cabai Rawit',satuan:'gram',harga:30,kategori:'bumbu',stok:300},
+  {id:'b10',nama:'Garam',satuan:'gram',harga:0.5,kategori:'bumbu',stok:1000},
+  {id:'b11',nama:'Gas/Energi',satuan:'porsi',harga:800,kategori:'overhead',stok:999},
+  {id:'b12',nama:'Kemasan/Wadah',satuan:'pcs',harga:500,kategori:'kemasan',stok:200},
+  {id:'b13',nama:'Teh Celup',satuan:'kantong',harga:300,kategori:'minuman',stok:100},
+  {id:'b14',nama:'Gula Pasir',satuan:'gram',harga:15,kategori:'bumbu',stok:2000},
+  {id:'b15',nama:'Es Batu',satuan:'gram',harga:1,kategori:'minuman',stok:5000},
+];
+
+let demoResep = [
+  {
+    id:'r1',nama:'Nasi Goreng Spesial',emoji:'🍳',menuId:'m1',porsiPerResep:1,
+    bahan:[
+      {bahanId:'b1',qty:200},
+      {bahanId:'b3',qty:2},
+      {bahanId:'b2',qty:30},
+      {bahanId:'b5',qty:10},
+      {bahanId:'b6',qty:15},
+      {bahanId:'b7',qty:10},
+      {bahanId:'b10',qty:3},
+      {bahanId:'b11',qty:1},
+      {bahanId:'b12',qty:1},
+    ],
+    catatan:'Resep standar 1 porsi nasi goreng spesial dengan 2 butir telur'
+  },
+  {
+    id:'r2',nama:'Mie Goreng',emoji:'🍜',menuId:'m2',porsiPerResep:1,
+    bahan:[
+      {bahanId:'b8',qty:100},
+      {bahanId:'b3',qty:1},
+      {bahanId:'b2',qty:20},
+      {bahanId:'b5',qty:8},
+      {bahanId:'b6',qty:10},
+      {bahanId:'b7',qty:8},
+      {bahanId:'b10',qty:2},
+      {bahanId:'b11',qty:1},
+      {bahanId:'b12',qty:1},
+    ],
+    catatan:'1 porsi mie goreng standard'
+  },
+  {
+    id:'r3',nama:'Ayam Geprek',emoji:'🍗',menuId:'m3',porsiPerResep:1,
+    bahan:[
+      {bahanId:'b4',qty:150},
+      {bahanId:'b2',qty:100},
+      {bahanId:'b9',qty:20},
+      {bahanId:'b6',qty:10},
+      {bahanId:'b7',qty:8},
+      {bahanId:'b10',qty:3},
+      {bahanId:'b11',qty:1},
+      {bahanId:'b12',qty:1},
+    ],
+    catatan:'Ayam geprek pedas 1 porsi'
+  },
+  {
+    id:'r4',nama:'Es Teh Manis',emoji:'🧋',menuId:'m9',porsiPerResep:1,
+    bahan:[
+      {bahanId:'b13',qty:2},
+      {bahanId:'b14',qty:20},
+      {bahanId:'b15',qty:150},
+      {bahanId:'b12',qty:1},
+    ],
+    catatan:'1 gelas es teh manis'
+  },
+];
+
+let bahanData = [...demoBahan];
+let resepData = [...demoResep];
+
+const BAHAN_CATEGORIES = {
+  bahan_pokok:{label:'Bahan Pokok',icon:'🌾'},
+  protein:{label:'Protein',icon:'🥩'},
+  bumbu:{label:'Bumbu',icon:'🌶️'},
+  overhead:{label:'Overhead',icon:'⚡'},
+  kemasan:{label:'Kemasan',icon:'📦'},
+  minuman:{label:'Minuman',icon:'🧃'},
+  lainnya:{label:'Lainnya',icon:'📌'},
+};
+
+// =============================================
+// HPP FUNCTIONS
+// =============================================
+window.switchHppTab = function(tab, el){
+  document.querySelectorAll('.hpp-tab').forEach(t=>t.classList.remove('active'));
+  document.querySelectorAll('.hpp-section').forEach(s=>s.classList.remove('active'));
+  if(el) el.classList.add('active');
+  const sec = document.getElementById('htab-'+tab);
+  if(sec) sec.classList.add('active');
+  if(tab==='daftar') renderHppDaftar();
+  if(tab==='kalkulator') renderKalkulatorInit();
+  if(tab==='bahan') renderBahanTable();
+  if(tab==='analisa') renderAnalisaMargin();
+};
+
+function calcHPP(resep){
+  let total = 0;
+  resep.bahan.forEach(b=>{
+    const bahan = bahanData.find(x=>x.id===b.bahanId);
+    if(bahan) total += b.qty * bahan.harga;
+  });
+  return total / (resep.porsiPerResep || 1);
+}
+
+function getMenuHarga(menuId){
+  const m = menuItems.find(x=>x.id===menuId);
+  return m ? m.harga : 0;
+}
+
+window.renderHpp = function(){
+  renderHppDaftar();
+  renderBahanTable();
+  renderKalkulatorInit();
+  renderAnalisaMargin();
+};
+
+function renderHppDaftar(){
+  // Stats
+  const statEl = document.getElementById('hpp-stat-cards');
+  if(!statEl) return;
+  const totalResep = resepData.length;
+  const avgMargin = resepData.length ? resepData.reduce((sum,r)=>{
+    const hpp = calcHPP(r); const harga = getMenuHarga(r.menuId);
+    return sum + (harga>0 ? ((harga-hpp)/harga)*100 : 0);
+  },0)/resepData.length : 0;
+  const hppTerendah = resepData.length ? Math.min(...resepData.map(r=>calcHPP(r))) : 0;
+  const linked = resepData.filter(r=>r.menuId).length;
+  statEl.innerHTML = `
+    <div class="stat-card" data-icon="📋"><div class="stat-label">Total Resep</div><div class="stat-value blue">${totalResep}</div><div class="stat-sub">${linked} terhubung ke menu</div></div>
+    <div class="stat-card" data-icon="📊"><div class="stat-label">Rata-rata Margin</div><div class="stat-value ${avgMargin>=40?'green':avgMargin>=25?'':'red'}">${avgMargin.toFixed(1)}%</div><div class="stat-sub">Target minimal 40%</div></div>
+    <div class="stat-card" data-icon="💰"><div class="stat-label">HPP Terendah</div><div class="stat-value">${fmt(hppTerendah)}</div><div class="stat-sub">Per porsi</div></div>
+    <div class="stat-card" data-icon="🛒"><div class="stat-label">Total Bahan Baku</div><div class="stat-value">${bahanData.length}</div><div class="stat-sub">Item terdaftar</div></div>
+  `;
+
+  // Resep list
+  const listEl = document.getElementById('hpp-resep-list');
+  if(!listEl) return;
+  if(!resepData.length){
+    listEl.innerHTML='<div class="empty-state"><div class="empty-state-icon">🍽</div><div class="empty-state-text">Belum ada resep. Klik "+ Buat Resep Baru" untuk mulai.</div></div>';
+    return;
+  }
+  listEl.innerHTML = resepData.map(r=>{
+    const hpp = calcHPP(r);
+    const harga = getMenuHarga(r.menuId);
+    const margin = harga>0 ? ((harga-hpp)/harga)*100 : null;
+    const marginCls = margin===null?'tag-gray':margin>=40?'tag-green':margin>=25?'tag-yellow':'tag-red';
+    const marginLabel = margin===null?'Belum ada harga jual':`Margin ${margin.toFixed(1)}%`;
+    const menuLink = r.menuId ? `<span class="link-menu-badge">🔗 ${menuItems.find(m=>m.id===r.menuId)?.nama||'—'}</span>` : '<span class="tag tag-gray">Belum terhubung ke menu</span>';
+    const jumlahBahan = r.bahan.length;
+    return `<div class="resep-card">
+      <div class="resep-header">
+        <div class="resep-emoji">${r.emoji||'🍽'}</div>
+        <div class="resep-info">
+          <div class="resep-nama">${r.nama}</div>
+          <div class="resep-meta">${jumlahBahan} bahan · ${r.porsiPerResep||1} porsi/resep · ${menuLink}</div>
+          ${r.catatan?`<div style="font-size:11px;color:var(--ink3);margin-top:3px;font-style:italic">${r.catatan}</div>`:''}
+        </div>
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px">
+          <span class="resep-hpp-badge">HPP ${fmt(hpp)}/porsi</span>
+          ${harga>0?`<span class="resep-hpp-badge" style="background:#ddeeff;color:#1a44a8">Jual ${fmt(harga)}</span>`:''}
+          <span class="tag ${marginCls}">${marginLabel}</span>
+        </div>
+      </div>
+      <div style="margin-top:12px;border-top:1px solid var(--border);padding-top:10px">
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:6px">
+          ${r.bahan.map(b=>{
+            const bahan = bahanData.find(x=>x.id===b.bahanId);
+            if(!bahan) return '';
+            const cost = b.qty * bahan.harga;
+            return `<div style="display:flex;align-items:center;gap:6px;font-size:12px;background:var(--bg);padding:5px 8px;border-radius:6px">
+              <span style="flex:1;color:var(--ink2)">${bahan.nama}</span>
+              <span style="color:var(--ink3);font-family:'JetBrains Mono',monospace">${b.qty} ${bahan.satuan}</span>
+              <span style="color:var(--accent);font-family:'JetBrains Mono',monospace;font-weight:600">${fmt(cost)}</span>
+            </div>`;
+          }).join('')}
+        </div>
+        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px">
+          <button class="btn btn-secondary btn-sm" onclick="openResepModal('${r.id}')">✏️ Edit</button>
+          <button class="btn btn-danger btn-sm" onclick="deleteResep('${r.id}')">🗑 Hapus</button>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function renderKalkulatorInit(){
+  const sel = document.getElementById('kalk-resep-select');
+  if(!sel) return;
+  sel.innerHTML = '<option value="">-- Pilih resep --</option>' + resepData.map(r=>`<option value="${r.id}">${r.emoji||'🍽'} ${r.nama}</option>`).join('');
+  renderKalkulator();
+}
+
+window.renderKalkulator = function(){
+  const resepId = document.getElementById('kalk-resep-select')?.value;
+  const inputsEl = document.getElementById('kalk-bahan-inputs');
+  const resEl = document.getElementById('kalk-result');
+  if(!inputsEl||!resEl) return;
+  if(!resepId){
+    inputsEl.innerHTML='';
+    resEl.innerHTML='<div class="empty-state"><div class="empty-state-icon">🧮</div><div class="empty-state-text">Pilih resep terlebih dahulu</div></div>';
+    return;
+  }
+  const resep = resepData.find(r=>r.id===resepId);
+  if(!resep){ inputsEl.innerHTML=''; return; }
+
+  inputsEl.innerHTML = `<div style="font-size:12px;font-weight:600;color:var(--ink3);text-transform:uppercase;letter-spacing:.6px;margin-bottom:8px">Stok Bahan Tersedia</div>` +
+    resep.bahan.map(b=>{
+      const bahan = bahanData.find(x=>x.id===b.bahanId);
+      if(!bahan) return '';
+      return `<div class="input-group" style="margin-bottom:10px">
+        <label class="input-label">${bahan.nama} (dibutuhkan: ${b.qty} ${bahan.satuan}/porsi)</label>
+        <div style="display:flex;gap:8px;align-items:center">
+          <input class="input" type="number" id="kalk-stok-${b.bahanId}" value="${bahan.stok}" min="0" placeholder="Stok tersedia" oninput="hitungPorsi()">
+          <span style="font-size:12px;color:var(--ink3);min-width:40px">${bahan.satuan}</span>
+        </div>
+      </div>`;
+    }).join('');
+  hitungPorsi();
+};
+
+window.hitungPorsi = function(){
+  const resepId = document.getElementById('kalk-resep-select')?.value;
+  const resEl = document.getElementById('kalk-result');
+  if(!resEl||!resepId) return;
+  const resep = resepData.find(r=>r.id===resepId);
+  if(!resep) return;
+
+  let minPorsi = Infinity;
+  let bottleneck = null;
+  const details = resep.bahan.map(b=>{
+    const bahan = bahanData.find(x=>x.id===b.bahanId);
+    if(!bahan) return null;
+    const stokEl = document.getElementById('kalk-stok-'+b.bahanId);
+    const stok = stokEl ? parseFloat(stokEl.value)||0 : bahan.stok;
+    const porsiDariStok = b.qty > 0 ? Math.floor(stok / b.qty) : 999999;
+    if(porsiDariStok < minPorsi){ minPorsi=porsiDariStok; bottleneck=bahan.nama; }
+    return {bahan, stok, qtyPerPorsi: b.qty, porsiDariStok};
+  }).filter(Boolean);
+
+  if(minPorsi===Infinity) minPorsi=0;
+  const hpp = calcHPP(resep);
+  const harga = getMenuHarga(resep.menuId);
+  const totalPendapatan = minPorsi * harga;
+  const totalHPP = minPorsi * hpp;
+  const totalMargin = totalPendapatan - totalHPP;
+
+  resEl.innerHTML = `
+    <div style="text-align:center;padding:20px;background:linear-gradient(135deg,var(--accent2),#1a55a8);border-radius:12px;color:#fff;margin-bottom:16px">
+      <div style="font-size:12px;text-transform:uppercase;letter-spacing:.8px;opacity:.8;font-weight:600">Bisa Dibuat</div>
+      <div class="porsi-result" style="color:#fff;font-size:48px">${minPorsi}</div>
+      <div style="font-size:14px;opacity:.9">porsi ${resep.nama}</div>
+      ${bottleneck&&minPorsi<999?`<div style="font-size:11px;margin-top:8px;opacity:.8">⚠️ Bahan pembatas: ${bottleneck}</div>`:''}
+    </div>
+    ${minPorsi<5&&minPorsi>0?`<div class="hpp-alert-low">⚠️ Stok bahan hampir habis! Pertimbangkan restock segera.</div>`:''}
+    ${minPorsi===0?`<div class="hpp-alert-low" style="background:#fde8e4;border-color:#f0a090;color:#8a2010">❌ Tidak cukup stok untuk membuat 1 porsi pun. Silakan restock bahan: <strong>${bottleneck}</strong></div>`:''}
+    <div class="porsi-calc-box">
+      <div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.6px;color:var(--ink3);margin-bottom:8px">Proyeksi Hasil</div>
+      <div class="porsi-detail-row"><span>HPP per porsi</span><span class="td-mono" style="color:var(--accent)">${fmt(hpp)}</span></div>
+      <div class="porsi-detail-row"><span>Harga jual per porsi</span><span class="td-mono">${harga>0?fmt(harga):'Belum ada'}</span></div>
+      <div class="porsi-detail-row"><span>Total HPP (${minPorsi} porsi)</span><span class="td-mono" style="color:var(--accent)">${fmt(totalHPP)}</span></div>
+      <div class="porsi-detail-row"><span>Total Pendapatan</span><span class="td-mono" style="color:var(--accent3)">${harga>0?fmt(totalPendapatan):'—'}</span></div>
+      <div class="porsi-detail-row" style="font-weight:700"><span>Estimasi Laba Kotor</span><span class="td-mono" style="color:${totalMargin>0?'var(--accent3)':'var(--accent)'}">${harga>0?fmt(totalMargin):'—'}</span></div>
+    </div>
+    <div style="margin-top:16px">
+      <div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.6px;color:var(--ink3);margin-bottom:8px">Detail per Bahan</div>
+      ${details.map(d=>{
+        const pct = Math.min(d.stok/(d.qtyPerPorsi*Math.max(minPorsi,1)+0.01)*100,100);
+        const barColor = d.porsiDariStok===minPorsi?'var(--accent)':d.porsiDariStok<minPorsi*2?'var(--warn)':'var(--accent3)';
+        return `<div style="margin-bottom:8px">
+          <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:3px">
+            <span style="color:var(--ink2)">${d.bahan.nama}</span>
+            <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--ink3)">${d.stok} ${d.bahan.satuan} → <strong>${d.porsiDariStok} porsi</strong></span>
+          </div>
+          <div style="height:5px;background:var(--surface2);border-radius:3px;overflow:hidden">
+            <div style="height:100%;width:${pct}%;background:${barColor};border-radius:3px;transition:width .4s"></div>
+          </div>
+        </div>`;
+      }).join('')}
+    </div>
+  `;
+};
+
+function renderBahanTable(){
+  const tbody = document.getElementById('bahan-tbody');
+  if(!tbody) return;
+  if(!bahanData.length){tbody.innerHTML='<tr><td colspan="6" style="text-align:center;color:var(--ink3);padding:20px">Belum ada bahan baku</td></tr>';return;}
+  tbody.innerHTML = bahanData.map(b=>{
+    const cat = BAHAN_CATEGORIES[b.kategori]||BAHAN_CATEGORIES.lainnya;
+    return `<tr>
+      <td style="font-weight:600">${b.nama}</td>
+      <td class="td-mono">${b.satuan}</td>
+      <td class="td-mono" style="color:var(--accent)">${fmt(b.harga)}</td>
+      <td><span class="tag tag-blue">${cat.icon} ${cat.label}</span></td>
+      <td class="td-mono">${b.stok.toLocaleString('id-ID')}</td>
+      <td>
+        <div style="display:flex;gap:6px">
+          <button class="btn btn-secondary btn-sm" onclick="openBahanModal('${b.id}')">✏️</button>
+          <button class="btn btn-danger btn-sm" onclick="deleteBahan('${b.id}')">🗑</button>
+        </div>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+function renderAnalisaMargin(){
+  const el = document.getElementById('analisa-margin-list');
+  if(!el) return;
+  if(!resepData.length){el.innerHTML='<div class="empty-state"><div class="empty-state-icon">📊</div><div class="empty-state-text">Belum ada resep untuk dianalisa</div></div>';return;}
+  const sorted = [...resepData].map(r=>{
+    const hpp=calcHPP(r); const harga=getMenuHarga(r.menuId);
+    const margin=harga>0?((harga-hpp)/harga)*100:null;
+    return {...r,hpp,harga,margin};
+  }).sort((a,b)=>(b.margin||0)-(a.margin||0));
+
+  el.innerHTML = `<div class="table-wrap"><table>
+    <thead><tr><th>Menu</th><th>HPP/Porsi</th><th>Harga Jual</th><th>Laba Kotor/Porsi</th><th>Margin</th><th>Status</th></tr></thead>
+    <tbody>${sorted.map(r=>{
+      const laba = r.harga - r.hpp;
+      const marCls = r.margin===null?'tag-gray':r.margin>=40?'hpp-margin-ok':r.margin>=25?'hpp-margin-warn':'hpp-margin-bad';
+      const marLabel = r.margin===null?'Belum ada harga':r.margin>=40?'✅ Sehat':r.margin>=25?'⚠️ Cukup':'❌ Rendah';
+      return `<tr>
+        <td><div style="display:flex;align-items:center;gap:8px"><span style="font-size:18px">${r.emoji||'🍽'}</span><div><div style="font-weight:600;font-size:13px">${r.nama}</div><div style="font-size:11px;color:var(--ink3)">${r.bahan.length} bahan</div></div></div></td>
+        <td class="td-mono" style="color:var(--accent)">${fmt(r.hpp)}</td>
+        <td class="td-mono">${r.harga>0?fmt(r.harga):'<span style="color:var(--ink3)">—</span>'}</td>
+        <td class="td-mono" style="color:${laba>0?'var(--accent3)':'var(--accent)'}">${r.harga>0?fmt(laba):'—'}</td>
+        <td class="td-mono" style="font-weight:700">${r.margin!==null?r.margin.toFixed(1)+'%':'—'}</td>
+        <td><span class="hpp-margin-badge ${marCls}">${marLabel}</span></td>
+      </tr>`;
+    }).join('')}</tbody>
+  </table></div>`;
+}
+
+// =============================================
+// HPP MODALS
+// =============================================
+window.openResepModal = function(resepId){
+  const r = resepId ? resepData.find(x=>x.id===resepId) : null;
+  const isEdit = !!r;
+  
+  const menuOptions = menuItems.map(m=>`<option value="${m.id}" ${r?.menuId===m.id?'selected':''}>${m.emoji||'🍽'} ${m.nama} — ${fmt(m.harga)}</option>`).join('');
+  
+  let bahanRowsHtml = '';
+  const initBahan = r ? r.bahan : [];
+  resepRowCount = initBahan.length > 0 ? initBahan.length : 1;
+
+  openModal(isEdit?'✏️ Edit Resep':'➕ Buat Resep Baru',`
+    <div class="form-row">
+      <div class="input-group"><label class="input-label">Nama Resep</label><input class="input" id="r-nama" value="${r?.nama||''}" placeholder="Nama resep/menu"></div>
+      <div class="input-group"><label class="input-label">Emoji</label><input class="input" id="r-emoji" value="${r?.emoji||'🍽'}" style="width:70px"></div>
+    </div>
+    <div class="form-row">
+      <div class="input-group"><label class="input-label">Terhubung ke Menu Kasir</label>
+        <select class="input" id="r-menu"><option value="">-- Tidak dihubungkan --</option>${menuOptions}</select>
+      </div>
+      <div class="input-group"><label class="input-label">Jumlah Porsi per Resep</label>
+        <input class="input" type="number" id="r-porsi" value="${r?.porsiPerResep||1}" min="1">
+      </div>
+    </div>
+    <div class="input-group"><label class="input-label">Catatan</label><input class="input" id="r-catatan" value="${r?.catatan||''}" placeholder="Catatan resep..."></div>
+    <hr style="margin:16px 0;border-color:var(--border)">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+      <div style="font-size:13px;font-weight:700">🛒 Daftar Bahan Baku</div>
+      <button class="btn btn-blue btn-sm" type="button" onclick="addBahanRow()">+ Tambah Bahan</button>
+    </div>
+    <div id="resep-bahan-rows">
+      ${initBahan.map((b,i)=>{
+        const bahan = bahanData.find(x=>x.id===b.bahanId);
+        return buildBahanRow(i, b.bahanId, b.qty);
+      }).join('')}
+      ${!initBahan.length?buildBahanRow(0,'',''):''}
+    </div>
+    <div id="r-hpp-preview" style="margin-top:14px"></div>
+  `, `
+    <button class="btn btn-secondary" onclick="closeModal()">Batal</button>
+    <button class="btn btn-primary" onclick="saveResep('${resepId||''}')">💾 Simpan Resep</button>
+  `);
+  updateResepHPPPreview();
+};
+
+function buildBahanRow(i, bahanId='', qty=''){
+  const opts = bahanData.map(b=>`<option value="${b.id}" ${b.id===bahanId?'selected':''}>${b.nama} (${b.satuan})</option>`).join('');
+  return `<div class="bahan-row" id="bahan-row-${i}" style="display:flex;gap:8px;align-items:center;padding:6px 0;border-bottom:1px solid var(--border)">
+    <select class="input" style="flex:2" onchange="updateResepHPPPreview()" id="br-bahan-${i}"><option value="">-- Pilih bahan --</option>${opts}</select>
+    <input class="input" type="number" style="flex:1;min-width:80px" id="br-qty-${i}" value="${qty}" placeholder="Qty" oninput="updateResepHPPPreview()">
+    <button class="btn btn-danger btn-sm btn-icon" type="button" onclick="removeBahanRow(${i})">✕</button>
+  </div>`;
+}
+
+let resepRowCount = 1;
+window.addBahanRow = function(){
+  const container = document.getElementById('resep-bahan-rows');
+  if(!container) return;
+  const i = resepRowCount++;
+  const div = document.createElement('div');
+  div.innerHTML = buildBahanRow(i);
+  container.appendChild(div.firstChild);
+};
+window.removeBahanRow = function(i){
+  const row = document.getElementById('bahan-row-'+i);
+  if(row) row.remove();
+  updateResepHPPPreview();
+};
+window.updateResepHPPPreview = function(){
+  const el = document.getElementById('r-hpp-preview');
+  if(!el) return;
+  const bahan = collectResepBahan();
+  const porsi = parseInt(document.getElementById('r-porsi')?.value)||1;
+  let total = 0;
+  bahan.forEach(b=>{ const bh=bahanData.find(x=>x.id===b.bahanId); if(bh) total+=b.qty*bh.harga; });
+  const hppPerPorsi = total/porsi;
+  const menuId = document.getElementById('r-menu')?.value;
+  const hargaJual = menuId?getMenuHarga(menuId):0;
+  const margin = hargaJual>0?((hargaJual-hppPerPorsi)/hargaJual*100):null;
+  el.innerHTML = `<div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px;font-size:12px">
+    <div style="display:flex;gap:16px;flex-wrap:wrap">
+      <div><span style="color:var(--ink3)">HPP/porsi: </span><strong style="color:var(--accent);font-family:'JetBrains Mono',monospace">${fmt(hppPerPorsi)}</strong></div>
+      ${hargaJual>0?`<div><span style="color:var(--ink3)">Harga jual: </span><strong style="font-family:'JetBrains Mono',monospace">${fmt(hargaJual)}</strong></div>`:'' }
+      ${margin!==null?`<div><span style="color:var(--ink3)">Margin: </span><strong style="color:${margin>=40?'var(--accent3)':margin>=25?'var(--warn)':'var(--accent)'};font-family:'JetBrains Mono',monospace">${margin.toFixed(1)}%</strong></div>`:''}
+    </div>
+  </div>`;
+};
+
+function collectResepBahan(){
+  const rows = document.querySelectorAll('[id^="bahan-row-"]');
+  const result = [];
+  rows.forEach(row=>{
+    const i = row.id.replace('bahan-row-','');
+    const bahanEl = document.getElementById('br-bahan-'+i);
+    const qtyEl = document.getElementById('br-qty-'+i);
+    if(bahanEl&&qtyEl&&bahanEl.value&&parseFloat(qtyEl.value)>0){
+      result.push({bahanId:bahanEl.value, qty:parseFloat(qtyEl.value)});
+    }
+  });
+  return result;
+}
+
+
+
+
+// =============================================
 // EVENTS
 // =============================================
 document.getElementById('login-pass').addEventListener('keydown',e=>{if(e.key==='Enter')doLogin();});
@@ -2968,125 +3514,10 @@ document.getElementById('modal-overlay').addEventListener('click',e=>{if(e.targe
 document.getElementById('struk-overlay').addEventListener('click',e=>{if(e.target===document.getElementById('struk-overlay'))closeStruk();});
 
 // =============================================
-// MOBILE NAV & UX
+// INIT
 // =============================================
-const isMobile=()=>window.innerWidth<=768;
-
-// Show/hide bottom nav after login
-const _origAfterLogin=afterLogin;
-afterLogin=function(){
-  _origAfterLogin.apply(this,arguments);
-  if(isMobile()){
-    document.getElementById('bottom-nav').style.display='flex';
-    document.getElementById('cart-fab').style.display='flex';
-    syncBottomNav(currentActivePage||'dashboard');
-    updateFabCount();
-  }
-};
-
-// Mobile navigation via bottom bar
-window.mobileNav=function(page){
-  showPage(page);
-  syncBottomNav(page);
-  // Close more menu if open
-  document.getElementById('mobile-more-menu').classList.remove('open');
-  // Show/hide FAB only on kasir
-  const fab=document.getElementById('cart-fab');
-  if(fab) fab.style.display=(page==='kasir'&&isMobile())?'flex':'none';
-};
-
-// Sync active state on bottom nav
-function syncBottomNav(page){
-  const mainPages=['dashboard','kasir','kds','orders'];
-  document.querySelectorAll('.bn-item').forEach(el=>el.classList.remove('active'));
-  const btn=document.getElementById('bn-'+page);
-  if(btn) btn.classList.add('active');
-  else {
-    // it's in the "more" menu, highlight more button
-    const moreBtn=document.getElementById('bn-more');
-    if(moreBtn) moreBtn.classList.add('active');
-  }
-}
-
-// Toggle more menu
-window.toggleMobileMore=function(){
-  const mm=document.getElementById('mobile-more-menu');
-  mm.classList.toggle('open');
-};
-
-// Toggle cart on mobile (FAB button)
-window.toggleMobileCart=function(){
-  if(!isMobile()) return;
-  const layout=document.querySelector('.pos-layout');
-  const backBtn=document.getElementById('cart-back-btn');
-  const fab=document.getElementById('cart-fab');
-  if(!layout) return;
-  const isOpen=layout.classList.contains('cart-open');
-  layout.classList.toggle('cart-open');
-  if(backBtn) backBtn.style.display=isOpen?'none':'flex';
-  if(fab) fab.innerHTML=isOpen?'🛒<span class="fab-count" id="fab-count"></span>':'✕';
-  updateFabCount();
-};
-
-// Update FAB cart count badge
-function updateFabCount(){
-  const count=cart.reduce((s,i)=>s+i.qty,0);
-  const fab=document.getElementById('fab-count');
-  if(!fab) return;
-  if(count>0){fab.textContent=count;fab.classList.add('show');}
-  else{fab.classList.remove('show');}
-}
-
-// Hook into cart changes to update FAB badge
-const _origAddToCart=window.addToCart;
-if(typeof window.addToCart==='function'){
-  window.addToCart=function(){
-    _origAddToCart.apply(this,arguments);
-    updateFabCount();
-  };
-}
-
-// Update order badges on bottom nav
-function updateBottomNavBadges(){
-  const orderCount=activeOrders.filter(o=>o.status!=='done'&&o.status!=='cancelled').length;
-  const cookingCount=activeOrders.filter(o=>o.status==='cooking').length;
-  const ob=document.getElementById('bn-badge-orders');
-  const kb=document.getElementById('bn-badge-kds');
-  if(ob){if(orderCount>0){ob.textContent=orderCount;ob.classList.add('show');}else ob.classList.remove('show');}
-  if(kb){if(cookingCount>0){kb.textContent=cookingCount;kb.classList.add('show');}else kb.classList.remove('show');}
-}
-setInterval(updateBottomNavBadges,3000);
-
-// Track current active page
-let currentActivePage='dashboard';
-const _origShowPage=showPage;
-showPage=function(page){
-  _origShowPage.apply(this,arguments);
-  currentActivePage=page;
-};
-
-// Handle window resize
-window.addEventListener('resize',()=>{
-  const mob=isMobile();
-  const bn=document.getElementById('bottom-nav');
-  const fab=document.getElementById('cart-fab');
-  if(bn&&currentUser) bn.style.display=mob?'flex':'none';
-  if(fab) fab.style.display=(mob&&currentActivePage==='kasir')?'flex':'none';
-});
-
-// Prevent modal close on scroll (iOS fix)
-document.querySelectorAll('.modal').forEach(m=>{
-  m.addEventListener('touchmove',e=>e.stopPropagation(),{passive:true});
-});
-
-// Close more menu on outside tap
-document.addEventListener('click',function(e){
-  const mm=document.getElementById('mobile-more-menu');
-  const bnMore=document.getElementById('bn-more');
-  if(mm&&mm.classList.contains('open')&&!mm.contains(e.target)&&e.target!==bnMore&&!bnMore?.contains(e.target)){
-    mm.classList.remove('open');
-  }
-});
+// Session init ditangani oleh Firebase module di atas
+// (function(){ ... })();
 </script>
 </body>
 </html>
