@@ -1287,119 +1287,200 @@ tbody tr:hover{background:var(--surface2)}
 }
 
 /* =============================================
-   MOBILE FIX PATCH — mengatasi numpuk di HP
+   MOBILE FIX v2 — POS kasir tidak numpuk
    ============================================= */
 @media(max-width:768px){
 
-  /* NAV: paksa scroll horizontal agar tidak overflow */
-  .nav{
-    overflow-x:auto!important;
-    overflow-y:hidden!important;
-    -webkit-overflow-scrolling:touch;
-    scrollbar-width:none;
-    flex-wrap:nowrap!important;
-    display:flex!important;
-  }
-  .nav::-webkit-scrollbar{display:none}
-  .nav-item{
-    flex-shrink:0!important;
-    white-space:nowrap!important;
-  }
-
-  /* APP shell: izinkan scroll penuh di mobile */
-  #app{
-    height:auto!important;
-    min-height:100vh!important;
-    overflow:visible!important;
-  }
-  .main{
-    overflow:visible!important;
-    height:auto!important;
-  }
-  .page{
-    overflow:visible!important;
-    height:auto!important;
-    display:none;
-  }
-  .page.active{display:block!important}
-
-  /* POS layout: full scroll, tidak fixed height */
-  .pos-layout{
-    display:flex!important;
-    flex-direction:column!important;
-    height:auto!important;
-    overflow:visible!important;
-  }
-  .pos-menu{
-    height:auto!important;
-    min-height:280px!important;
-    max-height:55vh!important;
-    overflow-y:auto!important;
-    -webkit-overflow-scrolling:touch;
-    display:flex!important;
-    flex-direction:column!important;
-  }
-  .product-grid{
-    flex:1;
-    overflow-y:auto!important;
-    -webkit-overflow-scrolling:touch;
-    max-height:calc(55vh - 110px)!important;
-  }
-  .pos-cart{
-    height:auto!important;
-    overflow:visible!important;
-    flex-shrink:0!important;
-  }
-  .cart-items{
-    max-height:180px!important;
-    overflow-y:auto!important;
-    -webkit-overflow-scrolling:touch;
-  }
-  .cart-footer{
-    overflow:visible!important;
-  }
-
-  /* Quick cash buttons: wrap ke 3 per baris */
-  .quick-cash-wrap{
-    display:grid!important;
-    grid-template-columns:1fr 1fr 1fr!important;
-    gap:6px!important;
-  }
-
-  /* Checkout button selalu terlihat */
-  .checkout-btn{
-    position:sticky;
-    bottom:0;
-    z-index:10;
-  }
-
-  /* KDS page: scroll full */
-  #page-kds{
-    height:auto!important;
-    overflow:visible!important;
-  }
-  .kds-layout{
-    height:auto!important;
-    overflow:visible!important;
-  }
-
-  /* Body & page-scroll tidak clipped */
+  /* BODY: scroll normal, tidak hidden */
   body{
     overflow-x:hidden!important;
     overflow-y:auto!important;
     height:auto!important;
   }
 
-  /* Payment methods: 3 tombol penuh lebar */
+  /* APP SHELL: hapus fixed height, biarkan natural */
+  #app{
+    height:auto!important;
+    min-height:100vh!important;
+    overflow:visible!important;
+    display:flex!important;
+    flex-direction:column!important;
+  }
+
+  /* MAIN: tidak clipping konten */
+  .main{
+    overflow:visible!important;
+    height:auto!important;
+    flex:unset!important;
+    display:block!important;
+  }
+
+  /* PAGE: blok biasa, bukan flex fixed */
+  .page{
+    display:none!important;
+    overflow:visible!important;
+    height:auto!important;
+    flex-direction:column!important;
+  }
+  .page.active{
+    display:block!important;
+  }
+
+  /* ---- POS / KASIR ---- */
+  /* Layout utama: kolom penuh, scroll bebas */
+  #page-kasir{
+    display:block!important;
+    overflow:visible!important;
+    height:auto!important;
+  }
+  .pos-layout{
+    display:flex!important;
+    flex-direction:column!important;
+    height:auto!important;
+    overflow:visible!important;
+    gap:0!important;
+  }
+
+  /* Area menu produk: tinggi tetap bisa scroll */
+  .pos-menu{
+    height:auto!important;
+    max-height:none!important;
+    min-height:unset!important;
+    overflow:visible!important;
+    border-right:none!important;
+    border-bottom:1px solid var(--border)!important;
+    display:flex!important;
+    flex-direction:column!important;
+  }
+
+  /* Product grid: tampilkan semua, tidak di-clip */
+  .product-grid{
+    overflow:visible!important;
+    max-height:none!important;
+    height:auto!important;
+    grid-template-columns:1fr 1fr!important;
+    gap:8px!important;
+    padding:10px!important;
+    flex:unset!important;
+  }
+
+  /* Kartu produk: pastikan nama & harga muncul */
+  .prod-card{
+    display:flex!important;
+    flex-direction:column!important;
+    overflow:visible!important;
+    height:auto!important;
+  }
+  .prod-img-placeholder{
+    height:56px!important;
+    font-size:22px!important;
+    width:100%!important;
+    flex-shrink:0!important;
+  }
+  .prod-info{
+    display:block!important;
+    padding:6px 8px!important;
+    overflow:visible!important;
+  }
+  .prod-name{
+    font-size:11px!important;
+    font-weight:600!important;
+    display:block!important;
+    white-space:normal!important;
+    overflow:visible!important;
+    line-height:1.3!important;
+    margin-bottom:2px!important;
+  }
+  .prod-price{
+    font-size:10px!important;
+    display:block!important;
+    overflow:visible!important;
+  }
+
+  /* CART: tidak fixed height */
+  .pos-cart{
+    height:auto!important;
+    overflow:visible!important;
+    flex-shrink:0!important;
+    display:flex!important;
+    flex-direction:column!important;
+  }
+  .cart-items{
+    max-height:200px!important;
+    overflow-y:auto!important;
+    -webkit-overflow-scrolling:touch!important;
+    flex:unset!important;
+  }
+  .cart-footer{
+    overflow:visible!important;
+    height:auto!important;
+  }
+
+  /* Payment method 3 kolom */
   .payment-methods{
     display:grid!important;
     grid-template-columns:1fr 1fr 1fr!important;
     gap:6px!important;
   }
   .pay-btn{
+    padding:9px 4px!important;
+    font-size:11px!important;
     text-align:center!important;
-    font-size:12px!important;
-    padding:10px 4px!important;
+  }
+
+  /* Quick cash grid 3 kolom */
+  .quick-cash-wrap{
+    display:grid!important;
+    grid-template-columns:1fr 1fr 1fr!important;
+    gap:5px!important;
+    margin-bottom:8px!important;
+  }
+  .quick-cash-btn{
+    flex:unset!important;
+    font-size:10px!important;
+    padding:6px 2px!important;
+  }
+
+  /* Tombol bayar sticky di bawah */
+  .checkout-btn{
+    position:sticky!important;
+    bottom:0!important;
+    z-index:20!important;
+    width:100%!important;
+  }
+
+  /* ---- KDS ---- */
+  #page-kds{
+    height:auto!important;
+    overflow:visible!important;
+    display:block!important;
+  }
+  .kds-layout{
+    height:auto!important;
+    overflow:visible!important;
+    flex-direction:column!important;
+  }
+  .kds-col{
+    overflow:visible!important;
+    height:auto!important;
+    min-height:150px!important;
+  }
+  .kds-cards{
+    overflow:visible!important;
+    max-height:none!important;
+  }
+
+  /* NAV: scroll horizontal, tidak wrap */
+  .nav{
+    overflow-x:auto!important;
+    overflow-y:hidden!important;
+    flex-wrap:nowrap!important;
+    scrollbar-width:none!important;
+  }
+  .nav::-webkit-scrollbar{display:none}
+  .nav-item{
+    flex-shrink:0!important;
+    white-space:nowrap!important;
   }
 }
 </style>
