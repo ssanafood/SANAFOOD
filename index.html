@@ -2,7 +2,10 @@
 <html lang="id">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>SANA FOOD POS</title>
 <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=JetBrains+Mono:wght@300;400;500&family=DM+Sans:ital,wght@0,300;0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
@@ -16,6 +19,7 @@ import {
   getDocs, getDoc, query, where, orderBy, onSnapshot, serverTimestamp,
   Timestamp, writeBatch, limit, runTransaction
 } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+import { getMessaging, getToken, onMessage } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-messaging.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyB5WinQxsLcVXCCCOYeLAz-wKfwr0RUJsU",
@@ -28,6 +32,212 @@ const firebaseConfig = {
 
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
+
+// =============================================
+// FIREBASE CLOUD MESSAGING (FCM) - Setup
+// =============================================
+let messaging = null;
+let fcmToken = null;
+
+// VAPID Key dari Firebase Console → Project Settings → Cloud Messaging → Web Push certificates
+const FCM_VAPID_KEY = 'BKb4KN25ndzX6o0dizJVpQ2q-2LxbWjsNvgFEPeoI6iUuESbGahZwLOF4g556Ptynm70fX-FE_ZzdXRr9Ol0Xc8';
+
+// Register Service Worker secara inline (tidak butuh file firebase-messaging-sw.js terpisah)
+async function registerFCMServiceWorker() {
+  if (!("serviceWorker" in navigator)) return null;
+  try {
+    const swContent = `
+importScripts('https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js');
+importScripts('https://www.gstatic.com/firebasejs/10.12.0/firebase-messaging-compat.js');
+const firebaseConfig = {
+  apiKey: "AIzaSyB5WinQxsLcVXCCCOYeLAz-wKfwr0RUJsU",
+  authDomain: "sanafood-9327e.firebaseapp.com",
+  projectId: "sanafood-9327e",
+  storageBucket: "sanafood-9327e.firebasestorage.app",
+  messagingSenderId: "471687703186",
+  appId: "1:471687703186:web:e7415bf7ced358ba62144b"
+};
+firebase.initializeApp(firebaseConfig);
+const messaging = firebase.messaging();
+messaging.onBackgroundMessage((payload) => {
+  const n = payload.notification || {};
+  const d = payload.data || {};
+  self.registration.showNotification(n.title || '\u{1F373} Order Baru Masuk!', {
+    body: n.body || ('Order ' + (d.orderNum||'baru') + ' menunggu di dapur!'),
+    icon: 'data:image/svg+xml,<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\"><text y=\".9em\" font-size=\"90\">\u{1F373}</text></svg>',
+    tag: 'dapur-' + Date.now(),
+    vibrate: [400,150,400,150,600],
+    requireInteraction: true,
+    actions: [{action:'view',title:'Lihat Order'}],
+    data: d
+  });
+});
+self.addEventListener('notificationclick', (e) => {
+  e.notification.close();
+  e.waitUntil(clients.matchAll({type:'window',includeUncontrolled:true}).then(list => {
+    for (const c of list) { if ('focus' in c) return c.focus(); }
+    if (clients.openWindow) return clients.openWindow('/');
+  }));
+});
+`;
+    const blob = new Blob([swContent], {type:'application/javascript'});
+    const swUrl = URL.createObjectURL(blob);
+    const reg = await navigator.serviceWorker.register(swUrl, {scope:'/'});
+    console.log('[FCM] SW terdaftar');
+    return reg;
+  } catch(e) {
+    console.warn('[FCM] SW gagal:', e.message);
+    return null;
+  }
+}
+
+// Inisialisasi FCM: minta izin + ambil token
+async function initFCM() {
+  try {
+    if (!("Notification" in window)) return;
+    await registerFCMServiceWorker();
+    const { getMessaging, getToken, onMessage } = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-messaging.js");
+    messaging = getMessaging(app);
+    const permission = await Notification.requestPermission();
+    if (permission !== 'granted') { console.warn('[FCM] Izin ditolak'); return; }
+    try {
+      const swReg = await navigator.serviceWorker.ready;
+      fcmToken = await getToken(messaging, { vapidKey: FCM_VAPID_KEY, serviceWorkerRegistration: swReg });
+      if (fcmToken) { console.log('[FCM] Token OK'); window._fcmToken = fcmToken; }
+    } catch(e) { console.warn('[FCM] Token gagal:', e.message); }
+    onMessage(messaging, (payload) => {
+      if (currentUser && currentUser.role === 'dapur') {
+        const d = payload.data || payload.notification || {};
+        triggerDapurNotification({
+          orderNum: d.orderNum || 'Baru',
+          customer: d.customer || '',
+          itemCount: parseInt(d.itemCount||1),
+          kasir: d.kasir || 'Kasir',
+          total: parseInt(d.total||0)
+        });
+      }
+    });
+  } catch(e) { console.error('[FCM] Init error:', e); }
+}
+
+// Simpan token ke Firestore
+async function saveFcmToken(userId, token) {
+  if (!token || !userId) return;
+  try {
+    await setDoc(doc(db, 'fcmTokens', userId), {
+      token, userId,
+      role: currentUser?.role || 'unknown',
+      updatedAt: serverTimestamp(),
+      platform: /Android|iPhone|iPad/.test(navigator.userAgent) ? 'mobile' : 'web'
+    });
+  } catch(e) { console.warn('[FCM] Simpan token gagal:', e); }
+}
+
+// Kirim notif ke antrian Firestore — Cloud Function akan proses & kirim FCM push
+async function sendPushToDapur(order) {
+  try {
+    await addDoc(collection(db, 'notifQueue'), {
+      type: 'order_baru',
+      targetRole: 'dapur',
+      orderId: order.id || '',
+      orderNum: order.orderNum || '',
+      customer: order.customer || '',
+      itemCount: (order.items || []).length,
+      total: order.total || 0,
+      kasir: order.kasir || '',
+      createdAt: serverTimestamp(),
+      processed: false
+    });
+  } catch(e) { console.warn('[FCM] Queue error:', e); }
+}
+
+// =============================================
+// LISTEN NOTIF QUEUE — dapur listen Firestore
+// =============================================
+let notifQueueUnsubscribe = null;
+let _processedNotifIds = new Set();
+
+function startListenNotifQueue() {
+  if (!currentUser || currentUser.role !== 'dapur') return;
+  if (notifQueueUnsubscribe) notifQueueUnsubscribe();
+  const q = query(
+    collection(db, 'notifQueue'),
+    where('targetRole', '==', 'dapur'),
+    where('processed', '==', false),
+    orderBy('createdAt', 'desc'),
+    limit(10)
+  );
+  notifQueueUnsubscribe = onSnapshot(q, (snap) => {
+    snap.docChanges().forEach(async (change) => {
+      if (change.type === 'added') {
+        const docId = change.doc.id;
+        if (_processedNotifIds.has(docId)) return;
+        const data = change.doc.data();
+        const ts = data.createdAt?.toDate ? data.createdAt.toDate() : new Date();
+        if (Date.now() - ts.getTime() < 45000) {
+          _processedNotifIds.add(docId);
+          await updateDoc(change.doc.ref, { processed: true }).catch(()=>{});
+          triggerDapurNotification({
+            orderNum: data.orderNum,
+            customer: data.customer,
+            itemCount: data.itemCount,
+            kasir: data.kasir,
+            total: data.total
+          });
+        }
+      }
+    });
+  }, (e) => console.warn('[Dapur] Queue listen error:', e));
+}
+
+// MASTER: Trigger semua efek notifikasi dapur
+function triggerDapurNotification(info) {
+  // Suara keras
+  playDapurAlarm();
+
+  // Getaran (mobile)
+  if ('vibrate' in navigator) {
+    navigator.vibrate([400, 150, 400, 150, 600]);
+  }
+
+  // Banner in-app
+  pendingDapurNotif++;
+  const banner = document.getElementById('dapur-new-banner');
+  const countEl = document.getElementById('dapur-new-count');
+  if (banner && countEl) {
+    countEl.textContent = pendingDapurNotif;
+    banner.classList.remove('hidden');
+    const detailEl = document.getElementById('dapur-notif-detail');
+    if (detailEl) {
+      detailEl.textContent = info.orderNum
+        + (info.customer ? ' · ' + info.customer : '')
+        + ' · ' + info.itemCount + ' item'
+        + ' — Kasir: ' + info.kasir;
+    }
+    setTimeout(() => banner.classList.add('hidden'), 15000);
+  }
+
+  // OS Push Notification (muncul walau tab tidak aktif)
+  if (Notification.permission === 'granted') {
+    try {
+      const notif = new Notification('\u{1F373} Order Baru Masuk!', {
+        body: info.orderNum
+          + (info.customer ? ' untuk ' + info.customer : '')
+          + ' (' + info.itemCount + ' item)'
+          + '\nDari kasir: ' + info.kasir,
+        icon: 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">\u{1F373}</text></svg>',
+        tag: 'dapur-order-' + Date.now(),
+        requireInteraction: true,
+        silent: false
+      });
+      notif.onclick = () => { window.focus(); notif.close(); };
+      setTimeout(() => notif.close(), 30000);
+    } catch(e) {}
+  }
+
+  renderKds();
+  updateOrderBadge();
+}
 
 // =============================================
 // FIRESTORE COLLECTIONS
@@ -250,6 +460,8 @@ window.submitOrder = async function() {
 
     playSound('new');
     toast(`Order ${orderNum} dikirim ke dapur! 🍳`, 'success');
+    // Kirim push notification ke device dapur
+    sendPushToDapur({ id: orderId, orderNum, customer, items: cart, total, kasir: currentUser.nama });
     if (titipanSold.length) toast(`📦 Stok dikurangi: ${titipanSold.map(x => x.nama + ' ×' + x.qty).join(', ')}`, 'info');
 
     showStruk({ ...orderData, id: orderId });
@@ -639,6 +851,7 @@ async function initFirebase() {
 const _origConfirmLogout = window.confirmLogout;
 window.confirmLogout = function() {
   if (ordersUnsubscribe) { ordersUnsubscribe(); ordersUnsubscribe = null; }
+  if (notifQueueUnsubscribe) { notifQueueUnsubscribe(); notifQueueUnsubscribe = null; }
   closeModal();
   if (clockInterval) clearInterval(clockInterval);
   if (kdsInterval) clearInterval(kdsInterval);
@@ -1145,33 +1358,81 @@ tbody tr:hover{background:var(--surface2)}
 }
 
 /* =============================================
-   MOBILE FRIENDLY — max-width: 768px
+   MOBILE FRIENDLY — Consolidated v3
    ============================================= */
+
+/* ---- 768px and below ---- */
 @media(max-width:768px){
-  /* BODY */
-  body{overflow:auto}
+
+  /* BODY: scroll normal */
+  body{
+    overflow-x:hidden!important;
+    overflow-y:auto!important;
+    height:auto!important;
+  }
 
   /* LOGIN */
   .login-box{width:calc(100vw - 32px);padding:32px 24px;border-radius:12px}
-  .login-brand{font-size:24px}
+  .login-brand{font-size:22px}
+
+  /* APP SHELL */
+  #app{
+    height:auto!important;
+    min-height:100vh!important;
+    overflow:visible!important;
+    display:flex!important;
+    flex-direction:column!important;
+  }
 
   /* TOPBAR */
-  .topbar{padding:0 12px;height:52px}
-  .topbar-brand{font-size:15px}
-  .topbar-time{display:none}
-  .topbar-user span#user-display{display:none}
+  .topbar{padding:0 10px;height:50px}
+  .topbar-brand{font-size:14px}
+  .topbar-time{display:none!important}
+  #user-display{display:none!important}
   #dapur-refresh-badge{display:none!important}
-  .topbar-role-badge{font-size:9px;padding:2px 6px}
+  .topbar-role-badge{font-size:9px;padding:2px 5px}
   .logout-btn{padding:4px 8px;font-size:11px}
   .refresh-btn{padding:3px 7px}
 
   /* NAV */
-  .nav{padding:0 8px;gap:0}
-  .nav-item{padding:12px 10px;font-size:11px;gap:3px}
+  .nav{
+    padding:0 6px;
+    gap:0;
+    overflow-x:auto!important;
+    overflow-y:hidden!important;
+    flex-wrap:nowrap!important;
+    scrollbar-width:none!important;
+  }
+  .nav::-webkit-scrollbar{display:none}
+  .nav-item{
+    padding:11px 9px;
+    font-size:11px;
+    gap:3px;
+    flex-shrink:0!important;
+    white-space:nowrap!important;
+  }
   .nav-icon{font-size:13px}
 
-  /* MAIN pages */
-  .page-scroll{padding:12px}
+  /* MAIN */
+  .main{
+    overflow:visible!important;
+    height:auto!important;
+    flex:unset!important;
+    display:block!important;
+  }
+
+  /* PAGE — tetap sembunyikan page tidak aktif, aktif boleh scroll bebas */
+  .page{
+    display:none!important;
+  }
+  .page.active{
+    display:block!important;
+    overflow:visible!important;
+    height:auto!important;
+  }
+
+  /* PAGE SCROLL */
+  .page-scroll{padding:12px!important}
 
   /* STAT CARDS */
   .grid-4{grid-template-columns:1fr 1fr!important}
@@ -1186,152 +1447,19 @@ tbody tr:hover{background:var(--surface2)}
   /* SECTION HEADER */
   .section-header{flex-direction:column;align-items:flex-start;gap:8px;margin-bottom:14px}
   .section-title{font-size:17px}
-
-  /* POS / KASIR — stacked layout */
-  .pos-layout{grid-template-columns:1fr!important;height:auto;overflow:visible;display:flex;flex-direction:column}
-  .pos-menu{height:60vh;min-height:320px;border-right:none;border-bottom:1px solid var(--border)}
-  .pos-cart{height:auto;min-height:unset;flex-shrink:0}
-  .product-grid{grid-template-columns:repeat(auto-fill,minmax(110px,1fr))!important}
-  .prod-img-placeholder{height:64px;font-size:24px}
-  .prod-name{font-size:11px}
-  .prod-price{font-size:10px}
-  .cart-items{max-height:220px}
-  .checkout-btn{font-size:14px;padding:13px}
-
-  /* MODAL */
-  .modal-overlay{padding:8px;align-items:flex-end}
-  .modal{max-width:100%!important;border-radius:16px 16px 0 0;max-height:92vh}
-  .modal-header{padding:16px 16px 12px}
-  .modal-body{padding:16px}
-  .modal-footer{padding:12px 16px;gap:8px}
-  .modal-footer .btn{flex:1;justify-content:center}
-
-  /* FORMS */
-  .form-row{flex-direction:column;gap:0}
-  .form-row .input-group{min-width:unset;width:100%}
-
-  /* KDS */
-  .kds-layout{flex-direction:column;overflow-y:auto}
-  .kds-col{border-right:none;border-bottom:1px solid var(--border);min-height:200px;overflow:visible}
-  .kds-col:last-child{border-bottom:none}
-  .kds-cards{overflow-y:visible;max-height:none}
-  .kds-view-header{flex-wrap:wrap;gap:6px}
-
-  /* ORDER CARDS */
-  .oc-footer{flex-wrap:wrap;gap:6px}
-  .oc-time{flex:none}
-
-  /* TABLES — scroll horizontally */
-  .table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
-  table{min-width:520px}
-
-  /* DATE FILTER */
-  .date-filter{flex-wrap:wrap;gap:6px}
-  .date-filter input.input{width:130px!important}
-
-  /* NERACA / BEP inputs */
-  #bep-hari,#bep-target-laba{width:80px!important}
-
-  /* EXPENSE TABLE — tighter */
-  #expense-tbody td,#expense-tbody th{padding:8px 10px;font-size:12px}
-
-  /* SETTINGS TABS */
-  .settings-tabs{overflow-x:auto;padding:0 12px;scrollbar-width:none}
-  .settings-tabs::-webkit-scrollbar{display:none}
-  .settings-tab{white-space:nowrap;padding:10px 12px;font-size:12px}
-  .settings-content{padding:16px}
-
-  /* HPP TABS */
-  .hpp-tabs{flex-wrap:wrap;gap:5px}
-  .hpp-tab{font-size:12px;padding:6px 12px}
-
-  /* TOAST */
-  #toast-container{bottom:12px;right:8px;left:8px}
-  .toast{min-width:unset;width:100%}
-
-  /* EMPTY STATE */
-  .empty-state{padding:32px 16px}
-
-  /* TITIPAN grid */
-  #titipan-stats{grid-template-columns:1fr 1fr!important}
-
-  /* REPORT TABS */
-  .report-tabs{gap:5px}
-  .report-tab{font-size:12px;padding:6px 12px}
-
-  /* SECTION HEADER action buttons stack */
   .section-header > div:last-child{width:100%;display:flex;flex-wrap:wrap;gap:6px}
   .section-header > div:last-child .btn{flex:1}
 
-  /* CARD padding tighter on mobile */
+  /* CARD */
   .card{padding:14px}
 
-  /* Bar chart label width */
-  .bar-label{width:90px;font-size:11px}
-  .bar-val{width:70px;font-size:10px}
-
-  /* Bahan row stacking */
-  .bahan-row{flex-wrap:wrap;gap:6px}
-
-  /* Struk overlay scrollable */
-  #struk-overlay .modal{max-height:92vh}
-}
-
-/* Extra small screens */
-@media(max-width:400px){
-  .grid-4{grid-template-columns:1fr!important}
-  .topbar-role-badge{display:none}
-  .product-grid{grid-template-columns:1fr 1fr!important}
-  .nav-item{padding:10px 7px;font-size:10px}
-  .stat-value{font-size:17px}
-}
-
-/* =============================================
-   MOBILE FIX v2 — POS kasir tidak numpuk
-   ============================================= */
-@media(max-width:768px){
-
-  /* BODY: scroll normal, tidak hidden */
-  body{
-    overflow-x:hidden!important;
-    overflow-y:auto!important;
-    height:auto!important;
-  }
-
-  /* APP SHELL: hapus fixed height, biarkan natural */
-  #app{
-    height:auto!important;
-    min-height:100vh!important;
-    overflow:visible!important;
-    display:flex!important;
-    flex-direction:column!important;
-  }
-
-  /* MAIN: tidak clipping konten */
-  .main{
-    overflow:visible!important;
-    height:auto!important;
-    flex:unset!important;
-    display:block!important;
-  }
-
-  /* PAGE: blok biasa, bukan flex fixed */
-  .page{
-    display:none!important;
-    overflow:visible!important;
-    height:auto!important;
-    flex-direction:column!important;
-  }
-  .page.active{
-    display:block!important;
-  }
-
   /* ---- POS / KASIR ---- */
-  /* Layout utama: kolom penuh, scroll bebas */
   #page-kasir{
-    display:block!important;
     overflow:visible!important;
     height:auto!important;
+  }
+  #page-kasir.active{
+    display:block!important;
   }
   .pos-layout{
     display:flex!important;
@@ -1339,9 +1467,8 @@ tbody tr:hover{background:var(--surface2)}
     height:auto!important;
     overflow:visible!important;
     gap:0!important;
+    grid-template-columns:1fr!important;
   }
-
-  /* Area menu produk: tinggi tetap bisa scroll */
   .pos-menu{
     height:auto!important;
     max-height:none!important;
@@ -1352,8 +1479,6 @@ tbody tr:hover{background:var(--surface2)}
     display:flex!important;
     flex-direction:column!important;
   }
-
-  /* Product grid: tampilkan semua, tidak di-clip */
   .product-grid{
     overflow:visible!important;
     max-height:none!important;
@@ -1363,8 +1488,6 @@ tbody tr:hover{background:var(--surface2)}
     padding:10px!important;
     flex:unset!important;
   }
-
-  /* Kartu produk: pastikan nama & harga muncul */
   .prod-card{
     display:flex!important;
     flex-direction:column!important;
@@ -1397,7 +1520,7 @@ tbody tr:hover{background:var(--surface2)}
     overflow:visible!important;
   }
 
-  /* CART: tidak fixed height */
+  /* CART */
   .pos-cart{
     height:auto!important;
     overflow:visible!important;
@@ -1411,50 +1534,55 @@ tbody tr:hover{background:var(--surface2)}
     -webkit-overflow-scrolling:touch!important;
     flex:unset!important;
   }
-  .cart-footer{
-    overflow:visible!important;
-    height:auto!important;
-  }
+  .cart-footer{overflow:visible!important;height:auto!important}
 
-  /* Payment method 3 kolom */
+  /* Payment methods */
   .payment-methods{
     display:grid!important;
     grid-template-columns:1fr 1fr 1fr!important;
     gap:6px!important;
   }
-  .pay-btn{
-    padding:9px 4px!important;
-    font-size:11px!important;
-    text-align:center!important;
-  }
+  .pay-btn{padding:9px 4px!important;font-size:11px!important;text-align:center!important}
 
-  /* Quick cash grid 3 kolom */
+  /* Quick cash */
   .quick-cash-wrap{
     display:grid!important;
     grid-template-columns:1fr 1fr 1fr!important;
     gap:5px!important;
     margin-bottom:8px!important;
   }
-  .quick-cash-btn{
-    flex:unset!important;
-    font-size:10px!important;
-    padding:6px 2px!important;
-  }
+  .quick-cash-btn{flex:unset!important;font-size:10px!important;padding:6px 2px!important}
 
-  /* Tombol bayar sticky di bawah */
+  /* Checkout button sticky */
   .checkout-btn{
     position:sticky!important;
     bottom:0!important;
     z-index:20!important;
     width:100%!important;
+    font-size:14px;
+    padding:13px;
   }
 
-  /* ---- KDS ---- */
-  #page-kds{
-    height:auto!important;
-    overflow:visible!important;
-    display:block!important;
+  /* MODAL — sheet dari bawah */
+  .modal-overlay{padding:8px;align-items:flex-end!important}
+  .modal{
+    max-width:100%!important;
+    width:100%!important;
+    border-radius:20px 20px 0 0!important;
+    max-height:90vh!important;
   }
+  .modal-header{padding:16px 16px 12px}
+  .modal-body{padding:14px 16px}
+  .modal-footer{padding:12px 16px;gap:8px}
+  .modal-footer .btn{flex:1;justify-content:center}
+
+  /* FORMS */
+  .form-row{flex-direction:column!important;gap:0!important}
+  .form-row .input-group{min-width:unset!important;width:100%!important}
+
+  /* ---- KDS ---- */
+  #page-kds{height:auto!important;overflow:visible!important;}
+  #page-kds.active{display:block!important;}
   .kds-layout{
     height:auto!important;
     overflow:visible!important;
@@ -1464,23 +1592,113 @@ tbody tr:hover{background:var(--surface2)}
     overflow:visible!important;
     height:auto!important;
     min-height:150px!important;
+    border-right:none!important;
+    border-bottom:1px solid var(--border)!important;
   }
-  .kds-cards{
-    overflow:visible!important;
-    max-height:none!important;
-  }
+  .kds-col:last-child{border-bottom:none!important}
+  .kds-cards{overflow:visible!important;max-height:none!important}
+  .kds-view-header{flex-wrap:wrap;gap:6px}
 
-  /* NAV: scroll horizontal, tidak wrap */
-  .nav{
-    overflow-x:auto!important;
-    overflow-y:hidden!important;
-    flex-wrap:nowrap!important;
-    scrollbar-width:none!important;
+  /* ORDER CARDS */
+  .oc-footer{flex-wrap:wrap;gap:6px}
+  .oc-time{flex:none}
+
+  /* TABLES */
+  .table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+  table{min-width:480px}
+
+  /* DATE FILTER */
+  .date-filter{flex-wrap:wrap;gap:6px}
+  .date-filter input.input{width:130px!important}
+
+  /* NERACA / BEP */
+  #bep-hari,#bep-target-laba{width:80px!important}
+
+  /* EXPENSE TABLE */
+  #expense-tbody td,#expense-tbody th{padding:8px 10px;font-size:12px}
+
+  /* SETTINGS TABS */
+  .settings-tabs{overflow-x:auto!important;padding:0 10px;scrollbar-width:none}
+  .settings-tabs::-webkit-scrollbar{display:none}
+  .settings-tab{white-space:nowrap;padding:10px 11px;font-size:12px}
+  .settings-content{padding:14px}
+
+  /* HPP TABS */
+  .hpp-tabs{flex-wrap:wrap;gap:5px}
+  .hpp-tab{font-size:12px;padding:6px 12px}
+
+  /* TOAST */
+  #toast-container{bottom:12px;right:8px;left:8px}
+  .toast{min-width:unset;width:100%}
+
+  /* EMPTY STATE */
+  .empty-state{padding:32px 16px}
+
+  /* TITIPAN grid */
+  #titipan-stats{grid-template-columns:1fr 1fr!important}
+
+  /* REPORT TABS */
+  .report-tabs{gap:5px}
+  .report-tab{font-size:12px;padding:6px 12px}
+
+  /* BAR CHART */
+  .bar-label{width:90px;font-size:11px}
+  .bar-val{width:70px;font-size:10px}
+
+  /* BAHAN ROW */
+  .bahan-row{flex-wrap:wrap;gap:6px}
+
+  /* STRUK */
+  #struk-overlay .modal{max-height:92vh}
+}
+
+/* ---- 400px and below ---- */
+@media(max-width:400px){
+  .grid-4{grid-template-columns:1fr!important}
+  .topbar-role-badge{display:none!important}
+  .product-grid{grid-template-columns:1fr 1fr!important}
+  .nav-item{padding:10px 7px;font-size:10px}
+  .stat-value{font-size:17px}
+  .login-box{padding:28px 18px}
+  .modal-body{padding:12px 14px}
+}
+
+/* =============================================
+   iOS / TOUCH FIXES
+   ============================================= */
+
+/* Mencegah zoom otomatis saat focus input di iOS (font-size min 16px) */
+@media(max-width:768px){
+  input.input,
+  select.input,
+  textarea.input,
+  .login-input,
+  input[type="text"],
+  input[type="number"],
+  input[type="password"],
+  input[type="date"],
+  select,
+  textarea {
+    font-size:16px!important;
   }
-  .nav::-webkit-scrollbar{display:none}
-  .nav-item{
-    flex-shrink:0!important;
-    white-space:nowrap!important;
+  /* Kembalikan ukuran font label ke normal */
+  .input-label,.login-label{font-size:11px!important}
+}
+
+/* Touch-friendly tap targets (min 44px) */
+@media(max-width:768px){
+  .qty-btn{width:32px!important;height:32px!important}
+  .btn-sm{min-height:36px}
+  .nav-item{min-height:44px}
+  .cat-btn{min-height:36px;padding:6px 14px}
+}
+
+/* Safe area untuk iPhone notch / bottom bar */
+@supports(padding:max(0px)){
+  @media(max-width:768px){
+    .topbar{padding-top:env(safe-area-inset-top);height:calc(50px + env(safe-area-inset-top))}
+    .checkout-btn{padding-bottom:calc(13px + env(safe-area-inset-bottom))!important}
+    #toast-container{bottom:calc(12px + env(safe-area-inset-bottom))}
   }
 }
 </style>
@@ -1535,26 +1753,38 @@ tbody tr:hover{background:var(--surface2)}
   </div>
 
   <div class="nav" id="app-nav">
-    <div class="nav-item active" data-page="dashboard" onclick="showPage('dashboard')"><span class="nav-icon">📊</span> Dashboard</div>
-    <div class="nav-item" data-page="kasir" onclick="showPage('kasir')"><span class="nav-icon">🧾</span> Kasir / POS</div>
-    <div class="nav-item" data-page="orders" onclick="showPage('orders')">
+    <div class="nav-item active" data-page="dashboard"><span class="nav-icon">📊</span> Dashboard</div>
+    <div class="nav-item" data-page="kasir"><span class="nav-icon">🧾</span> Kasir / POS</div>
+    <div class="nav-item" data-page="orders">
       <span class="nav-icon">📋</span> Order Aktif
       <span class="nav-badge" id="badge-orders">0</span>
     </div>
-    <div class="nav-item" data-page="kds" onclick="showPage('kds')"><span class="nav-icon">🔥</span> Dapur (KDS)</div>
-    <div class="nav-item" data-page="riwayat" onclick="showPage('riwayat')"><span class="nav-icon">📜</span> Riwayat</div>
-    <div class="nav-item" data-page="titipan" onclick="showPage('titipan')"><span class="nav-icon">📦</span> Titipan</div>
-    <div class="nav-item admin-only" data-page="hpp" onclick="showPage('hpp')"><span class="nav-icon">🧮</span> HPP & Resep</div>
-    <div class="nav-item admin-only" data-page="laporan" onclick="showPage('laporan')"><span class="nav-icon">📈</span> Laporan</div>
-    <div class="nav-item admin-only" data-page="pengeluaran" onclick="showPage('pengeluaran')"><span class="nav-icon">💸</span> Pengeluaran</div>
-    <div class="nav-item admin-only" data-page="neraca" onclick="showPage('neraca')"><span class="nav-icon">⚖️</span> Neraca & BEP</div>
-    <div class="nav-item admin-only" data-page="settings" onclick="showPage('settings')"><span class="nav-icon">⚙️</span> Pengaturan</div>
+    <div class="nav-item" data-page="kds"><span class="nav-icon">🔥</span> Dapur (KDS)</div>
+    <div class="nav-item" data-page="riwayat"><span class="nav-icon">📜</span> Riwayat</div>
+    <div class="nav-item" data-page="titipan"><span class="nav-icon">📦</span> Titipan</div>
+    <div class="nav-item admin-only" data-page="hpp"><span class="nav-icon">🧮</span> HPP & Resep</div>
+    <div class="nav-item admin-only" data-page="laporan"><span class="nav-icon">📈</span> Laporan</div>
+    <div class="nav-item admin-only" data-page="pengeluaran"><span class="nav-icon">💸</span> Pengeluaran</div>
+    <div class="nav-item admin-only" data-page="neraca"><span class="nav-icon">⚖️</span> Neraca & BEP</div>
+    <div class="nav-item admin-only" data-page="settings"><span class="nav-icon">⚙️</span> Pengaturan</div>
   </div>
 
   <!-- DAPUR NEW ORDER BANNER -->
   <div class="dapur-banner hidden" id="dapur-new-banner">
-    🔔 <span id="dapur-new-count">0</span> ORDER BARU MASUK — Segera diproses!
-    <button onclick="document.getElementById('dapur-new-banner').classList.add('hidden')" style="margin-left:auto;background:rgba(255,255,255,.25);border:none;color:#fff;padding:3px 10px;border-radius:5px;cursor:pointer;font-size:12px">Tutup</button>
+    <div style="display:flex;align-items:center;gap:10px;width:100%">
+      <span style="font-size:22px;animation:bellRing .4s ease infinite alternate">🔔</span>
+      <div style="flex:1">
+        <div style="font-weight:700;font-size:15px">ORDER BARU MASUK! <span id="dapur-new-count" style="background:rgba(255,255,255,.3);border-radius:20px;padding:2px 10px">0</span></div>
+        <div id="dapur-notif-detail" style="font-size:12px;opacity:.9;margin-top:2px"></div>
+      </div>
+      <button onclick="document.getElementById('dapur-new-banner').classList.add('hidden')" style="background:rgba(255,255,255,.25);border:none;color:#fff;padding:5px 12px;border-radius:6px;cursor:pointer;font-size:12px;flex-shrink:0">✕ Tutup</button>
+    </div>
+  </div>
+  <!-- Tombol izin notifikasi (muncul untuk dapur yang belum izinkan) -->
+  <div id="notif-permission-bar" style="display:none;position:fixed;top:0;left:0;right:0;z-index:9990;background:#2a6bc8;color:#fff;padding:10px 16px;font-size:13px;display:flex;align-items:center;gap:10px">
+    <span>🔔 Aktifkan notifikasi agar pesan dari kasir muncul walau app ditutup</span>
+    <button onclick="requestNotifPermission()" style="background:#fff;color:#2a6bc8;border:none;padding:5px 14px;border-radius:6px;font-weight:700;cursor:pointer;flex-shrink:0">Aktifkan</button>
+    <button onclick="document.getElementById('notif-permission-bar').style.display='none'" style="background:rgba(255,255,255,.2);border:none;color:#fff;padding:5px 10px;border-radius:6px;cursor:pointer;flex-shrink:0">✕</button>
   </div>
 
   <div class="main">
@@ -1600,7 +1830,7 @@ tbody tr:hover{background:var(--surface2)}
 
     <!-- KASIR / POS -->
     <div class="page" id="page-kasir">
-      <div class="pos-layout" style="flex:1;overflow:hidden">
+      <div class="pos-layout">
         <div class="pos-menu">
           <div class="pos-search-bar">
             <div class="pos-search" style="flex:1">
@@ -1852,11 +2082,11 @@ tbody tr:hover{background:var(--surface2)}
     <!-- SETTINGS -->
     <div class="page admin-only" id="page-settings" style="overflow:hidden">
       <div class="settings-tabs">
-        <div class="settings-tab active" onclick="switchSettingsTab('menu',this)">🍽 Menu</div>
-        <div class="settings-tab" onclick="switchSettingsTab('kategori',this)">🏷 Kategori</div>
-        <div class="settings-tab" onclick="switchSettingsTab('users',this)">👤 User</div>
-        <div class="settings-tab" onclick="switchSettingsTab('outlet',this)">🏪 Outlet & Struk</div>
-        <div class="settings-tab" onclick="switchSettingsTab('notif',this)">🔔 Notifikasi</div>
+        <div class="settings-tab active" data-stab="menu">🍽 Menu</div>
+        <div class="settings-tab" data-stab="kategori">🏷 Kategori</div>
+        <div class="settings-tab" data-stab="users">👤 User</div>
+        <div class="settings-tab" data-stab="outlet">🏪 Outlet & Struk</div>
+        <div class="settings-tab" data-stab="notif">🔔 Notifikasi</div>
       </div>
       <div class="settings-content">
         <div class="settings-section active" id="stab-menu">
@@ -1921,10 +2151,10 @@ tbody tr:hover{background:var(--surface2)}
         </div>
 
         <div class="hpp-tabs">
-          <div class="hpp-tab active" onclick="switchHppTab('daftar',this)">📋 Daftar Resep</div>
-          <div class="hpp-tab" onclick="switchHppTab('kalkulator',this)">🧮 Kalkulator Porsi</div>
-          <div class="hpp-tab" onclick="switchHppTab('bahan',this)">🛒 Master Bahan Baku</div>
-          <div class="hpp-tab" onclick="switchHppTab('analisa',this)">📊 Analisa Margin</div>
+          <div class="hpp-tab active" data-hpptab="daftar">📋 Daftar Resep</div>
+          <div class="hpp-tab" data-hpptab="kalkulator">🧮 Kalkulator Porsi</div>
+          <div class="hpp-tab" data-hpptab="bahan">🛒 Master Bahan Baku</div>
+          <div class="hpp-tab" data-hpptab="analisa">📊 Analisa Margin</div>
         </div>
 
         <!-- TAB: DAFTAR RESEP -->
@@ -2218,6 +2448,11 @@ function afterLogin(){
     if(badge) badge.style.display = '';
     kdsInterval = setInterval(()=>{ checkNewOrdersForDapur(); },10000);
     startDapurAutoRefresh();
+    // Start FCM & listen notif queue untuk dapur
+    initFCM().then(() => {
+      if (window._fcmToken) saveFcmToken(currentUser.id, window._fcmToken);
+      startListenNotifQueue();
+    });
   } else {
     const badge = document.getElementById('dapur-refresh-badge');
     if(badge) badge.style.display = 'none';
@@ -3238,6 +3473,28 @@ window.softRefresh = async function(){
 // =============================================
 // SOUND
 // =============================================
+// Alarm khusus dapur — lebih keras & berulang
+window.playDapurAlarm = function() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const playBeep = (freq, start, dur, vol=0.5) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain); gain.connect(ctx.destination);
+      osc.frequency.setValueAtTime(freq, ctx.currentTime + start);
+      gain.gain.setValueAtTime(vol, ctx.currentTime + start);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + start + dur);
+      osc.start(ctx.currentTime + start);
+      osc.stop(ctx.currentTime + start + dur);
+    };
+    // 3 nada ding-ding-ding berulang 2x
+    [0, 0.35, 0.70, 1.2, 1.55, 1.90].forEach((t, i) => {
+      const freqs = [880, 1047, 1319];
+      playBeep(freqs[i % 3], t, 0.28, 0.6);
+    });
+  } catch(e) {}
+};
+
 window.playSound=function(type){
   try{const ctx=new(window.AudioContext||window.webkitAudioContext)();const osc=ctx.createOscillator();const gain=ctx.createGain();osc.connect(gain);gain.connect(ctx.destination);
   if(type==='new'){osc.frequency.setValueAtTime(880,ctx.currentTime);osc.frequency.setValueAtTime(1047,ctx.currentTime+0.1);gain.gain.setValueAtTime(0.3,ctx.currentTime);gain.gain.exponentialRampToValueAtTime(0.001,ctx.currentTime+0.4);osc.start();osc.stop(ctx.currentTime+0.4);}
@@ -3852,6 +4109,21 @@ function collectResepBahan(){
 document.getElementById('login-pass').addEventListener('keydown',e=>{if(e.key==='Enter')doLogin();});
 document.getElementById('modal-overlay').addEventListener('click',e=>{if(e.target===document.getElementById('modal-overlay'))closeModal();});
 document.getElementById('struk-overlay').addEventListener('click',e=>{if(e.target===document.getElementById('struk-overlay'))closeStruk();});
+
+// Main navigation tabs
+document.querySelectorAll('.nav-item[data-page]').forEach(item=>{
+  item.addEventListener('click',function(){ showPage(this.dataset.page); });
+});
+
+// Settings tabs
+document.querySelectorAll('.settings-tab[data-stab]').forEach(tab=>{
+  tab.addEventListener('click',function(){ switchSettingsTab(this.dataset.stab, this); });
+});
+
+// HPP tabs
+document.querySelectorAll('.hpp-tab[data-hpptab]').forEach(tab=>{
+  tab.addEventListener('click',function(){ switchHppTab(this.dataset.hpptab, this); });
+});
 
 // =============================================
 // INIT
