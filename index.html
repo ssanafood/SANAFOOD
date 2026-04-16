@@ -9,6 +9,18 @@
 <title>SANA FOOD POS</title>
 <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=JetBrains+Mono:wght@300;400;500&family=DM+Sans:ital,wght@0,300;0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+<!-- OneSignal Push Notification SDK -->
+<script src="https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js" defer></script>
+<script>
+  window.OneSignalDeferred = window.OneSignalDeferred || [];
+  OneSignalDeferred.push(async function(OneSignal) {
+    await OneSignal.init({
+      appId: "4071d380-c726-4883-9e57-0e43406b8b87",
+      notifyButton: { enable: false },
+      allowLocalhostAsSecureOrigin: true,
+    });
+  });
+</script>
 <script type="module">
 // =============================================
 // FIREBASE SDK IMPORTS
@@ -40,7 +52,7 @@ let messaging = null;
 let fcmToken = null;
 
 // VAPID Key dari Firebase Console → Project Settings → Cloud Messaging → Web Push certificates
-const FCM_VAPID_KEY = 'BKb4KN25ndzX6o0dizJVpQ2q-2LxbWjsNvgFEPeoI6iUuESbGahZwLOF4g556Ptynm70fX-FE_ZzdXRr9Ol0Xc8';
+const FCM_VAPID_KEY = 'BEl62iUYgUivxIkv69yViEuiBIa-Ib9-SkvMeAtA3LFgDzkrxZJjStoZkZyRs7p9XnWFEoNYBzKcDfIl6x5K4hY';
 
 // Register Service Worker secara inline (tidak butuh file firebase-messaging-sw.js terpisah)
 async function registerFCMServiceWorker() {
@@ -92,7 +104,59 @@ self.addEventListener('notificationclick', (e) => {
 }
 
 // Inisialisasi FCM: minta izin + ambil token
-async function initFCM() {
+// OneSignal init untuk dapur
+window.initOneSignalForDapur = async function initOneSignalForDapur() {
+  try {
+    window.OneSignalDeferred = window.OneSignalDeferred || [];
+    OneSignalDeferred.push(async function(OneSignal) {
+      await OneSignal.Notifications.requestPermission();
+      const playerId = await OneSignal.User.PushSubscription.id;
+      if (playerId && currentUser) {
+        await saveFcmToken(currentUser.id, playerId);
+        console.log('[OneSignal] Player ID saved:', playerId);
+      }
+      OneSignal.Notifications.addEventListener('foregroundWillDisplay', (event) => {
+        event.preventDefault();
+        const data = event.notification.additionalData || {};
+        if (currentUser && currentUser.role === 'dapur') {
+          triggerDapurNotification({
+            orderNum: data.orderNum || 'Baru',
+            customer: data.customer || '',
+            itemCount: parseInt(data.itemCount || 1),
+            kasir: data.kasir || 'Kasir',
+            total: parseInt(data.total || 0)
+          });
+        }
+      });
+    });
+  } catch(e) { console.error('[OneSignal] Init error:', e); }
+}
+
+// Kirim push via OneSignal ke semua device dapur
+window.sendOneSignalPushToDapur = async function sendOneSignalPushToDapur(info) {
+  try {
+    const snap = await getDocs(query(collection(db, 'fcmTokens'), where('role', '==', 'dapur')));
+    const playerIds = snap.docs.map(d => d.data().token).filter(Boolean);
+    if (!playerIds.length) return;
+    const appId = '4071d380-c726-4883-9e57-0e43406b8b87';
+    await fetch('https://onesignal.com/api/v1/notifications', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        app_id: appId,
+        include_player_ids: playerIds,
+        headings: { en: '\u{1F373} Order Baru Masuk!' },
+        contents: { en: info.orderNum + (info.customer ? ' \u00b7 ' + info.customer : '') + ' (' + info.itemCount + ' item) \u2014 Kasir: ' + info.kasir },
+        data: info,
+        priority: 10,
+        ttl: 60
+      })
+    });
+    console.log('[OneSignal] Push sent to', playerIds.length, 'device(s)');
+  } catch(e) { console.warn('[OneSignal] Push error:', e); }
+}
+
+window.initFCM = async function initFCM() {
   try {
     if (!("Notification" in window)) return;
     await registerFCMServiceWorker();
@@ -134,7 +198,7 @@ async function saveFcmToken(userId, token) {
 }
 
 // Kirim notif ke antrian Firestore — Cloud Function akan proses & kirim FCM push
-async function sendPushToDapur(order) {
+window.sendPushToDapur = async function sendPushToDapur(order) {
   try {
     await addDoc(collection(db, 'notifQueue'), {
       type: 'order_baru',
@@ -157,7 +221,7 @@ async function sendPushToDapur(order) {
 let notifQueueUnsubscribe = null;
 let _processedNotifIds = new Set();
 
-function startListenNotifQueue() {
+window.startListenNotifQueue = function startListenNotifQueue() {
   if (!currentUser || currentUser.role !== 'dapur') return;
   if (notifQueueUnsubscribe) notifQueueUnsubscribe();
   const q = query(
@@ -358,7 +422,7 @@ async function loadOrdersFromFirestore() {
 // =============================================
 let ordersUnsubscribe = null;
 
-function startOrdersRealtime() {
+window.startOrdersRealtime = function startOrdersRealtime() {
   if (ordersUnsubscribe) ordersUnsubscribe();
   const q = query(collection(db, COLS.orders), orderBy('createdAt','desc'), limit(500));
   ordersUnsubscribe = onSnapshot(q, (snap) => {
@@ -462,6 +526,7 @@ window.submitOrder = async function() {
     toast(`Order ${orderNum} dikirim ke dapur! 🍳`, 'success');
     // Kirim push notification ke device dapur
     sendPushToDapur({ id: orderId, orderNum, customer, items: cart, total, kasir: currentUser.nama });
+    sendOneSignalPushToDapur({ orderNum, customer, itemCount: cart.length, kasir: currentUser.nama, total });
     if (titipanSold.length) toast(`📦 Stok dikurangi: ${titipanSold.map(x => x.nama + ' ×' + x.qty).join(', ')}`, 'info');
 
     showStruk({ ...orderData, id: orderId });
@@ -1347,8 +1412,9 @@ tbody tr:hover{background:var(--surface2)}
 /* PRINT */
 #print-area{display:none}
 @media print{
-  body>*{display:none!important}
-  #print-area{display:block!important}
+  *{display:none!important}
+  #print-area,#print-area *{display:block!important}
+  #print-area .thermal-item,#print-area .thermal-item *{display:flex!important}
   body{margin:0;padding:0;background:#fff}
   .receipt{border:none;box-shadow:none;max-width:100%;margin:0;padding:8px;font-size:11px}
   .thermal-receipt{max-width:100%;padding:4px;font-size:12px}
@@ -2268,6 +2334,35 @@ let lastKnownOrderCount = 0;
 let outletSettings = { nama:'Sana Food', tagline:'', alamat:'', telp:'', header:'', footer:'Terima kasih sudah makan di Sana Food! 🍳' };
 
 // =============================================
+// BLUETOOTH THERMAL PRINTER — GLOBALS
+// =============================================
+let btDevice = null;
+let btCharacteristic = null;
+
+// ESC/POS Commands
+const ESC=0x1B, GS=0x1D;
+const ESC_INIT=[ESC,0x40], ESC_CENTER=[ESC,0x61,0x01], ESC_LEFT=[ESC,0x61,0x00];
+const ESC_BOLD_ON=[ESC,0x45,0x01], ESC_BOLD_OFF=[ESC,0x45,0x00];
+const ESC_BIG=[GS,0x21,0x11], ESC_NORMAL=[GS,0x21,0x00];
+const ESC_CUT=[GS,0x56,0x42,0x00], LF_B=[0x0A];
+const FEED_B=(n)=>[ESC,0x64,n];
+
+// UUID Printer — prioritas Rongta RPP02N, fallback ke UUID umum
+const PRINTER_SERVICES=[
+  '49535343-fe7d-4ae5-8fa9-9fafd205e455', // Rongta RPP02N
+  'e7810a71-73ae-499d-8c15-faa9aef0c3f2', // Seiko/Epson
+  '000018f0-0000-1000-8000-00805f9b34fb', // Zjiang/common
+  '6e400001-b5a3-f393-e0a9-e50e24dcca9e', // Nordic UART
+];
+const PRINTER_CHARS=[
+  '49535343-8841-43f4-a8d4-ecbe34729bb3', // Rongta RPP02N TX
+  '49535343-1e4d-4bd9-ba61-23c647249616', // Rongta RPP02N TX alt
+  'e7810a71-73ae-499d-8c15-faa9aef0c3f2',
+  '000018f0-0000-1000-8000-00805f9b34fb',
+  '6e400002-b5a3-f393-e0a9-e50e24dcca9e', // Nordic UART TX
+];
+
+// =============================================
 // DEMO DATA
 // =============================================
 let demoMenu = [
@@ -2448,11 +2543,9 @@ function afterLogin(){
     if(badge) badge.style.display = '';
     kdsInterval = setInterval(()=>{ checkNewOrdersForDapur(); },10000);
     startDapurAutoRefresh();
-    // Start FCM & listen notif queue untuk dapur
-    initFCM().then(() => {
-      if (window._fcmToken) saveFcmToken(currentUser.id, window._fcmToken);
-      startListenNotifQueue();
-    });
+    // Start OneSignal & listen notif queue untuk dapur
+    initOneSignalForDapur();
+    startListenNotifQueue();
   } else {
     const badge = document.getElementById('dapur-refresh-badge');
     if(badge) badge.style.display = 'none';
@@ -2707,13 +2800,31 @@ function showStruk(order){
   const footer = document.getElementById('struk-footer');
   const isKasir = currentUser && currentUser.role === 'kasir';
   const isAdmin = currentUser && currentUser.role === 'admin';
+  const isDapur = currentUser && currentUser.role === 'dapur';
+  const btConnected = !!btCharacteristic;
+  const btName = btDevice ? (btDevice.name||'Printer') : '';
+  const btPill = `<div id="bt-status-pill-struk" style="display:flex;align-items:center;gap:6px;font-size:11px;padding:5px 10px;border-radius:20px;background:var(--surface2);color:var(--ink3);border:1px solid var(--border);flex:1;min-width:150px">
+    <span id="bt-dot" style="width:8px;height:8px;border-radius:50%;background:${btConnected?'#2a8c5a':'#ccc'};flex-shrink:0"></span>
+    <span id="bt-label" style="color:${btConnected?'var(--accent3)':'var(--ink3)'}">${btConnected?'BT: '+btName:'Bluetooth: Tidak Terhubung'}</span>
+  </div>`;
   if(isKasir || isAdmin){
     footer.innerHTML=`
-      <button class="btn btn-secondary" onclick="kirimStruKeDapur('${order.id}')">🔔 Kirim Notif ke Dapur</button>
-      <button class="btn btn-success" onclick="selesaikanOrder('${order.id}')">✅ Selesaikan Order</button>`;
-  } else {
-    // Role dapur atau lainnya: tombol standar
+      ${btPill}
+      <button class="btn btn-secondary btn-sm" onclick="connectBluetooth()" id="btn-bt-connect">📡 ${btConnected?'Ganti':'Hubungkan'}</button>
+      <button class="btn btn-secondary" onclick="printStrukKasirBT('${order.id}')" id="btn-bt-print-kasir" ${btConnected?'':'disabled'} style="${btConnected?'':'opacity:0.5;cursor:not-allowed'}" title="${btConnected?'Print struk thermal':'Hubungkan printer Bluetooth terlebih dahulu'}">🖨️ Print BT</button>
+      <button class="btn btn-secondary" onclick="kirimStruKeDapur('${order.id}')">🔔 Notif Dapur</button>
+      <button class="btn btn-success" onclick="selesaikanOrder('${order.id}')">✅ Selesaikan</button>`;
+  } else if(isDapur){
     footer.innerHTML=`
+      ${btPill}
+      <button class="btn btn-secondary btn-sm" onclick="connectBluetooth()" id="btn-bt-connect">📡 ${btConnected?'Ganti':'Hubungkan'}</button>
+      <button class="btn btn-success" onclick="window.triggerPrintThermalBT('${order.id}')" id="btn-bt-print-struk" ${btConnected?'':'disabled'}>🖨️ Print BT</button>
+      <button class="btn btn-secondary" onclick="printStruk()">🖨 Browser</button>
+      <button class="btn btn-primary" onclick="closeStruk()">Tutup</button>`;
+  } else {
+    footer.innerHTML=`
+      ${btPill}
+      <button class="btn btn-secondary btn-sm" onclick="connectBluetooth()" id="btn-bt-connect">📡 ${btConnected?'Ganti':'Hubungkan'}</button>
       <button class="btn btn-secondary" onclick="printStruk()">🖨 Print</button>
       <button class="btn btn-primary" onclick="closeStruk()">Tutup</button>`;
   }
@@ -2821,10 +2932,15 @@ function renderKds(){
         <div style="display:flex;gap:8px;flex-wrap:wrap">
           ${o.status==='cooking'?`<button class="btn btn-success btn-sm" style="flex:1" onclick="updateOrderStatus('${o.id}','ready')">✅ Siap Saji</button>`:''}
           ${o.status==='ready'?`
-            <button class="btn btn-blue btn-sm" style="flex:1" onclick="updateOrderStatus('${o.id}','done')">✓ ${isDapur?'Selesai &amp; Cetak 🖨':'Sudah Diambil'}</button>
-            ${isDapur?`<button class="btn btn-secondary btn-sm" onclick="printThermalDapur(demoOrders.find(x=>x.id==='${o.id}'))">🖨 Print</button>`:''}
+            <button class="btn btn-blue btn-sm" style="flex:1" onclick="updateOrderStatus('${o.id}','done')">✓ ${isDapur?'Selesai & Cetak 🖨':'Sudah Diambil'}</button>
+            ${isDapur?`<button class="btn btn-secondary btn-sm" onclick="window.triggerPrintThermalBT('${o.id}')" id="btn-bt-print-dapur" ${btCharacteristic?'':'disabled'} title="${btCharacteristic?'Print via Bluetooth':'Hubungkan printer dulu!'}">🖨️ ${btCharacteristic?'Print BT':'No BT'}</button>`:''}
           `:''}
         </div>
+        ${isDapur?`<div style="display:flex;align-items:center;gap:6px;margin-top:6px;font-size:11px">
+          <span id="bt-dot-dapur" style="width:7px;height:7px;border-radius:50%;background:${btCharacteristic?'#2a8c5a':'#ccc'};flex-shrink:0"></span>
+          <span id="bt-label-dapur" style="color:${btCharacteristic?'var(--accent3)':'var(--ink3)'}">${btCharacteristic?'BT: '+(btDevice?btDevice.name||'Printer':'Printer'):'Bluetooth: Tidak Terhubung'}</span>
+          <button class="btn btn-secondary btn-sm" style="padding:3px 8px;font-size:10px" onclick="connectBluetooth()" id="btn-bt-connect-dapur">📡 ${btCharacteristic?'Ganti':'Hubungkan'}</button>
+        </div>`:''}
       </div>`;
     }).join('');
     // Hapus flag _isNew setelah render
@@ -3506,77 +3622,307 @@ window.playSound=function(type){
 // THERMAL PRINT (DAPUR)
 // =============================================
 
-window.printThermalDapur = function(order){
-  if(!order) return;
-  const s = outletSettings;
-  const timeStr = new Date(order.createdAt).toLocaleTimeString('id-ID',{hour:'2-digit',minute:'2-digit'});
-  const dateStr = new Date(order.createdAt).toLocaleDateString('id-ID',{day:'2-digit',month:'short',year:'numeric'});
-  const doneTime = new Date().toLocaleTimeString('id-ID',{hour:'2-digit',minute:'2-digit'});
-  
-  const itemsHtml = order.items.map(i=>`
-    <div class="thermal-item">
-      <span class="thermal-qty">${i.qty}\u00d7</span>
-      <span class="thermal-name">${i.nama}${i.isTitipan?' \ud83d\udce6':''}</span>
-    </div>
-    ${i.catatan?`<div class="thermal-note">\ud83d\udcdd ${i.catatan}</div>`:''}`).join('');
+// =============================================
+// BLUETOOTH PRINTER — HELPER FUNCTIONS
+// =============================================
 
-  const itemsPriceHtml = order.items.map(i=>`
+// Update status indikator Bluetooth di semua elemen bt-status
+function updateBtStatus(connected, name=''){
+  ['bt-dot','bt-dot-dapur'].forEach(id=>{
+    const el=document.getElementById(id);
+    if(el) el.style.background=connected?'#2a8c5a':'#ccc';
+  });
+  ['bt-label','bt-label-dapur'].forEach(id=>{
+    const el=document.getElementById(id);
+    if(el){ el.textContent=connected?'BT: '+name:'Bluetooth: Tidak Terhubung'; el.style.color=connected?'var(--accent3)':'var(--ink3)'; }
+  });
+  ['btn-bt-print','btn-bt-print-dapur','btn-bt-print-kasir'].forEach(id=>{
+    const el=document.getElementById(id);
+    if(el){
+      el.disabled=!connected;
+      el.style.opacity=connected?'':'0.5';
+      el.style.cursor=connected?'':'not-allowed';
+    }
+  });
+  ['btn-bt-connect','btn-bt-connect-dapur'].forEach(id=>{
+    const el=document.getElementById(id); if(el) el.textContent=connected?'🔗 Ganti':'📡 Hubungkan';
+  });
+  // Update bt-status-pill di struk
+  const dot=document.getElementById('bt-dot');
+  const label=document.getElementById('bt-label');
+  if(dot) dot.style.background=connected?'#2a8c5a':'#ccc';
+  if(label){ label.textContent=connected?'BT: '+name:'Bluetooth: Tidak Terhubung'; label.style.color=connected?'var(--accent3)':'var(--ink3)'; }
+}
+
+async function connectBluetooth(){
+  if(!navigator.bluetooth){toast('Web Bluetooth tidak didukung. Gunakan Chrome/Edge.','error');return;}
+  const btnIds=['btn-bt-connect','btn-bt-connect-dapur'];
+  btnIds.forEach(id=>{const b=document.getElementById(id);if(b){b.disabled=true;b.textContent='🔍 Mencari...';}});
+  try{
+    let dev=null;
+    // Langsung tampilkan semua device Bluetooth (acceptAllDevices) agar user bisa pilih sendiri
+    try{
+      dev=await navigator.bluetooth.requestDevice({acceptAllDevices:true,optionalServices:PRINTER_SERVICES});
+    }catch(e){
+      // User menutup dialog tanpa memilih — diam saja, tidak tampilkan error
+      if(e.name==='NotFoundError'||e.name==='NotAllowedError'){ return; }
+      throw e;
+    }
+    btDevice=dev;
+    btDevice.addEventListener('gattserverdisconnected',onBtDisconnected);
+    btnIds.forEach(id=>{const b=document.getElementById(id);if(b) b.textContent='⚡ Konek...';});
+    const server=await btDevice.gatt.connect();
+    btnIds.forEach(id=>{const b=document.getElementById(id);if(b) b.textContent='🔧 Init...';});
+    let svc=null;
+    for(const id of PRINTER_SERVICES){try{svc=await server.getPrimaryService(id);break;}catch(e){}}
+    if(!svc){try{const ss=await server.getPrimaryServices();if(ss.length)svc=ss[0];}catch(e){}}
+    if(!svc) throw new Error('Service printer tidak ditemukan di perangkat ini.');
+    let ch=null;
+    for(const id of PRINTER_CHARS){
+      try{const c=await svc.getCharacteristic(id);if(c.properties.write||c.properties.writeWithoutResponse){ch=c;break;}}catch(e){}
+    }
+    if(!ch){
+      try{const cs=await svc.getCharacteristics();ch=cs.find(c=>c.properties.writeWithoutResponse)||cs.find(c=>c.properties.write)||null;}catch(e){}
+    }
+    if(!ch) throw new Error('Characteristic write tidak ditemukan di perangkat ini.');
+    btCharacteristic=ch;
+    updateBtStatus(true,btDevice.name||'Printer');
+    toast('Printer '+btDevice.name+' terhubung! 🖨️','success');
+  }catch(err){
+    btDevice=null;btCharacteristic=null;updateBtStatus(false);
+    // Jangan tampilkan notif jika user sengaja cancel
+    if(err.name!=='NotFoundError'&&err.name!=='NotAllowedError'){
+      toast('Gagal terhubung: '+err.message,'error');
+    }
+  }finally{
+    btnIds.forEach(id=>{const b=document.getElementById(id);if(b){b.disabled=false;b.textContent=btCharacteristic?'🔗 Ganti':'📡 Hubungkan';}});
+  }
+}
+window.connectBluetooth = connectBluetooth;
+
+function onBtDisconnected(){
+  btCharacteristic=null;updateBtStatus(false);
+  toast('Printer terputus','warn');
+  if(btDevice&&btDevice.gatt){
+    btDevice.gatt.connect().then(server=>{
+      for(const id of PRINTER_SERVICES){
+        server.getPrimaryService(id).then(svc=>{
+          svc.getCharacteristics().then(cs=>{
+            for(const c of cs){
+              if(c.properties.write||c.properties.writeWithoutResponse){
+                btCharacteristic=c;updateBtStatus(true,btDevice.name||'Printer');
+                toast('Printer auto-reconnect ✓','success');break;
+              }
+            }
+          }).catch(()=>{});
+        }).catch(()=>{});break;
+      }
+    }).catch(()=>{});
+  }
+}
+
+// Encoding ESC/POS — ASCII langsung, non-ASCII fallback
+function encBytes(text){
+  const b=[],s=String(text||'');
+  for(let i=0;i<s.length;i++){
+    const c=s.charCodeAt(i);
+    if(c<128) b.push(c);
+    else if(c===0x2019||c===0x0027) b.push(0x27);
+    else if(c===0x2018||c===0x0060) b.push(0x60);
+    else if(c>=0xC0&&c<=0xFF) b.push(c&0xFF);
+    else b.push(0x3F);
+  }
+  return b;
+}
+
+function twoCol(l,r,W=32){
+  const rs=String(r||''); let ls=String(l||'');
+  const maxLeft=W-rs.length-1;
+  if(ls.length>maxLeft) ls=ls.substring(0,Math.max(1,maxLeft));
+  const spaces=W-ls.length-rs.length;
+  return ls+' '.repeat(Math.max(1,spaces))+rs;
+}
+
+function centerStr(text,W=32){
+  const s=String(text||'');if(s.length>=W)return s;
+  const p=Math.floor((W-s.length)/2);return ' '.repeat(p)+s;
+}
+
+function dashLine(W=32){return '-'.repeat(W);}
+
+function fmtThermal(n){return Number(n||0).toLocaleString('id-ID');}
+
+// Kirim bytes ke printer via BLE — chunk 200 bytes, delay 80ms
+async function sendToPrinter(bytes){
+  if(!btCharacteristic) throw new Error('Printer tidak terhubung!');
+  if(btDevice&&btDevice.gatt&&!btDevice.gatt.connected){
+    try{
+      await btDevice.gatt.connect();
+      const svcs=await btDevice.gatt.getPrimaryServices();
+      if(svcs.length){const cs=await svcs[0].getCharacteristics();for(const c of cs){if(c.properties.write||c.properties.writeWithoutResponse){btCharacteristic=c;break;}}}
+    }catch(e){throw new Error('Printer terputus, reconnect gagal: '+e.message);}
+  }
+  const data=new Uint8Array(bytes);
+  const CHUNK=200;
+  for(let i=0;i<data.length;i+=CHUNK){
+    const chunk=data.slice(i,i+CHUNK);
+    let ok=false;
+    if(btCharacteristic.properties.writeWithoutResponse){try{await btCharacteristic.writeValueWithoutResponse(chunk);ok=true;}catch(e){}}
+    if(!ok){try{await btCharacteristic.writeValue(chunk);}catch(e){throw new Error('Gagal kirim ke printer: '+e.message);}}
+    await new Promise(r=>setTimeout(r,80));
+  }
+}
+
+// =============================================
+// PRINT THERMAL VIA BLUETOOTH — DAPUR + KASIR
+// =============================================
+
+// Print thermal via BT (2 rangkap: Pelanggan + Pembukuan/Dapur)
+async function doPrintOrderBT(order){
+  const W=32;
+  const s=outletSettings;
+  const timeStr=new Date(order.createdAt||Date.now()).toLocaleTimeString('id-ID',{hour:'2-digit',minute:'2-digit'});
+  const dateStr=new Date(order.createdAt||Date.now()).toLocaleDateString('id-ID',{day:'2-digit',month:'short',year:'numeric'});
+  const doneTime=new Date().toLocaleTimeString('id-ID',{hour:'2-digit',minute:'2-digit'});
+
+  // ── RANGKAP 1: STRUK PELANGGAN (LENGKAP) ──
+  let b=[];
+  b.push(...ESC_INIT,...FEED_B(1));
+  b.push(...ESC_CENTER,...ESC_BIG,...ESC_BOLD_ON);
+  b.push(...encBytes(s.nama||'SANA FOOD'),...LF_B);
+  b.push(...ESC_NORMAL,...ESC_BOLD_OFF);
+  if(s.tagline) b.push(...encBytes(s.tagline),...LF_B);
+  if(s.alamat)  b.push(...encBytes(s.alamat),...LF_B);
+  b.push(...encBytes(dateStr+' '+timeStr),...LF_B);
+  b.push(...ESC_BOLD_ON,...encBytes(centerStr('[ RANGKAP 1 - PELANGGAN ]',W)),...LF_B,...ESC_BOLD_OFF,...ESC_LEFT);
+  b.push(...encBytes(dashLine(W)),...LF_B);
+  b.push(...encBytes(twoCol('Order:',order.orderNum,W)),...LF_B);
+  b.push(...encBytes(twoCol('Kasir:',order.kasir||'-',W)),...LF_B);
+  if(order.customer) b.push(...encBytes(twoCol('Customer:',order.customer,W)),...LF_B);
+  b.push(...encBytes(twoCol('Bayar:',(order.paymentMethod||'').toUpperCase(),W)),...LF_B);
+  b.push(...encBytes(dashLine(W)),...LF_B);
+  (order.items||[]).forEach(item=>{
+    b.push(...encBytes(String(item.nama||'-').substring(0,W)),...LF_B);
+    b.push(...encBytes(twoCol('  '+item.qty+' x Rp'+fmtThermal(item.harga),'Rp'+fmtThermal(item.qty*item.harga),W)),...LF_B);
+    if(item.catatan) b.push(...encBytes('  >> '+item.catatan),...LF_B);
+  });
+  b.push(...encBytes(dashLine(W)),...LF_B);
+  b.push(...ESC_BOLD_ON,...encBytes(twoCol('TOTAL','Rp'+fmtThermal(order.total),W)),...LF_B,...ESC_BOLD_OFF);
+  b.push(...ESC_CENTER,...encBytes(s.footer||'Terima kasih! 🍳'),...LF_B,...ESC_LEFT);
+  b.push(...FEED_B(4),...ESC_CUT);
+  await sendToPrinter(b);
+  toast('Rangkap 1 (Pelanggan) tercetak ✓','success');
+
+  // Delay antar rangkap
+  await new Promise(r=>setTimeout(r,3000));
+
+  // ── RANGKAP 2: STRUK DAPUR / ARSIP (RINGKAS) ──
+  b=[];
+  b.push(...ESC_INIT,...FEED_B(1));
+  b.push(...ESC_CENTER,...ESC_BOLD_ON,...encBytes(s.nama||'SANA FOOD'),...LF_B,...ESC_BOLD_OFF);
+  b.push(...encBytes(dateStr+' '+doneTime),...LF_B);
+  b.push(...ESC_BOLD_ON,...encBytes(centerStr('[ DAPUR / ARSIP ]',W)),...LF_B,...ESC_BOLD_OFF,...ESC_LEFT);
+  b.push(...encBytes(dashLine(W)),...LF_B);
+  b.push(...encBytes(twoCol('Order:',order.orderNum,W)),...LF_B);
+  b.push(...encBytes(twoCol('Kasir:',order.kasir||'-',W)),...LF_B);
+  if(order.customer) b.push(...encBytes(twoCol('Customer:',order.customer,W)),...LF_B);
+  b.push(...encBytes(dashLine(W)),...LF_B);
+  (order.items||[]).forEach(item=>{
+    const nama=String(item.nama||'-').substring(0,W-6);
+    b.push(...encBytes(twoCol(nama,'x'+item.qty,W)),...LF_B);
+    if(item.catatan) b.push(...encBytes('  >> '+item.catatan),...LF_B);
+  });
+  b.push(...encBytes(dashLine(W)),...LF_B);
+  b.push(...ESC_BOLD_ON,...encBytes(twoCol('TOTAL','Rp'+fmtThermal(order.total),W)),...LF_B,...ESC_BOLD_OFF);
+  b.push(...FEED_B(4),...ESC_CUT);
+  await sendToPrinter(b);
+  toast('Rangkap 2 (Dapur/Arsip) tercetak ✓','success');
+}
+
+// Tombol print di struk dapur
+window.triggerPrintThermalBT = async function(orderId){
+  const order=demoOrders.find(o=>o.id===orderId);
+  if(!order){toast('Order tidak ditemukan','error');return;}
+  if(!btCharacteristic){toast('Hubungkan printer Bluetooth dulu! Tekan 📡 Hubungkan','warn');return;}
+  const btn=document.getElementById('btn-bt-print-dapur');
+  if(btn){btn.disabled=true;btn.textContent='⏳ Printing...';}
+  try{ await doPrintOrderBT(order); }
+  catch(e){ toast('Gagal print: '+e.message,'error'); }
+  finally{ if(btn){btn.disabled=false;btn.textContent='🖨️ Print BT';} }
+};
+
+// Print struk untuk kasir/admin via BT — cek koneksi dulu
+window.printStrukKasirBT = async function(orderId){
+  if(!btCharacteristic){
+    toast('⚠️ Hubungkan printer Bluetooth dulu! Tekan tombol 📡 Hubungkan','warn');
+    return;
+  }
+  const order=demoOrders.find(o=>o.id===orderId);
+  if(!order){toast('Order tidak ditemukan','error');return;}
+  const btn=document.getElementById('btn-bt-print-kasir');
+  if(btn){btn.disabled=true;btn.textContent='⏳ Printing...';}
+  try{ await doPrintOrderBT(order); }
+  catch(e){ toast('Gagal print: '+e.message,'error'); }
+  finally{ if(btn){btn.disabled=false;btn.textContent='🖨️ Print BT';} }
+};
+
+// printThermalDapur — upgrade: pakai BT jika terhubung, fallback ke window.print()
+window.printThermalDapur = async function(order){
+  if(!order) return;
+  if(btCharacteristic){
+    // Pakai Bluetooth
+    try{ await doPrintOrderBT(order); return; }
+    catch(e){ toast('BT gagal, fallback ke browser print: '+e.message,'warn'); }
+  }
+  // Fallback: browser print (HTML thermal preview)
+  const s=outletSettings;
+  const timeStr=new Date(order.createdAt||Date.now()).toLocaleTimeString('id-ID',{hour:'2-digit',minute:'2-digit'});
+  const dateStr=new Date(order.createdAt||Date.now()).toLocaleDateString('id-ID',{day:'2-digit',month:'short',year:'numeric'});
+  const doneTime=new Date().toLocaleTimeString('id-ID',{hour:'2-digit',minute:'2-digit'});
+  const itemsHtml=order.items.map(i=>`
+    <div class="thermal-item"><span class="thermal-qty">${i.qty}\u00d7</span><span class="thermal-name">${i.nama}${i.isTitipan?' 📦':''}</span></div>
+    ${i.catatan?`<div class="thermal-note">📝 ${i.catatan}</div>`:''}`).join('');
+  const itemsPriceHtml=order.items.map(i=>`
     <div class="thermal-item" style="justify-content:space-between">
       <span><span class="thermal-qty">${i.qty}\u00d7</span> ${i.nama}</span>
       <span style="font-family:monospace">${fmt(i.qty*i.harga)}</span>
     </div>`).join('');
-
-  // STRUK 1: Pelanggan
-  const struk1 = `<div class="thermal-receipt">
-    <div class="thermal-header">
-      <div style="font-size:11px;color:#555">${s.nama||'Sana Food'}</div>
-      ${s.tagline?`<div style="font-size:10px;color:#777">${s.tagline}</div>`:''}
-      <div class="thermal-divider-thin"></div>
-      <div class="thermal-order-num">${order.orderNum}</div>
-      ${order.customer?`<div class="thermal-cust">\ud83d\udc64 ${order.customer}</div>`:''}
-      <div class="thermal-time">${dateStr} \u00b7 ${timeStr}</div>
+  document.getElementById('print-area').innerHTML=`
+    <div class="thermal-receipt">
+      <div class="thermal-header">
+        <div style="font-size:11px">${s.nama||'Sana Food'}</div>
+        ${s.tagline?`<div style="font-size:10px;color:#777">${s.tagline}</div>`:''}
+        <div class="thermal-divider-thin"></div>
+        <div class="thermal-order-num">${order.orderNum}</div>
+        ${order.customer?`<div class="thermal-cust">👤 ${order.customer}</div>`:''}
+        <div class="thermal-time">${dateStr} · ${timeStr}</div>
+      </div>
+      <div class="thermal-divider"></div>
+      <div style="font-size:10px;font-weight:700;letter-spacing:1px;text-align:center;margin-bottom:6px">— PESANAN —</div>
+      ${itemsHtml}
+      <div class="thermal-divider"></div>
+      <div style="display:flex;justify-content:space-between;font-size:12px;font-weight:700"><span>TOTAL</span><span>${fmt(order.total)}</span></div>
+      <div style="font-size:10px;margin-top:4px">Metode: ${(order.paymentMethod||'').toUpperCase()}</div>
+      <div class="thermal-divider"></div>
+      <div class="thermal-footer">Kasir: ${order.kasir||'—'} · Selesai: ${doneTime}</div>
+      <div style="font-size:9px;text-align:center;margin-top:8px;letter-spacing:2px;border:1px dashed #ccc;padding:3px">STRUK PELANGGAN</div>
     </div>
-    <div class="thermal-divider"></div>
-    <div style="font-size:10px;font-weight:700;letter-spacing:1px;text-align:center;margin-bottom:6px">\u2014 PESANAN \u2014</div>
-    ${itemsHtml}
-    <div class="thermal-divider"></div>
-    <div style="display:flex;justify-content:space-between;font-size:12px;font-weight:700">
-      <span>TOTAL</span><span>${fmt(order.total)}</span>
-    </div>
-    <div style="font-size:10px;margin-top:4px">Metode: ${(order.paymentMethod||'').toUpperCase()}</div>
-    <div class="thermal-divider"></div>
-    <div class="thermal-footer">
-      Kasir: ${order.kasir||'\u2014'} \u00b7 Selesai: ${doneTime}
-    </div>
-    <div style="font-size:10px;text-align:center;margin-top:6px;color:#555">${s.footer||'Terima kasih! \ud83c\udf73'}</div>
-    <div style="font-size:9px;text-align:center;margin-top:8px;letter-spacing:2px;border:1px dashed #ccc;padding:3px">STRUK PELANGGAN</div>
-  </div>`;
-
-  // STRUK 2: Pembukuan (dengan rincian harga)
-  const struk2 = `<div class="thermal-receipt" style="border-top:3px dashed #000;margin-top:12px;padding-top:12px">
-    <div class="thermal-header">
-      <div style="font-size:11px;color:#555">${s.nama||'Sana Food'}</div>
-      <div class="thermal-divider-thin"></div>
-      <div class="thermal-order-num">${order.orderNum}</div>
-      <div class="thermal-time">${dateStr} \u00b7 ${timeStr}</div>
-      ${order.customer?`<div style="font-size:10px">\ud83d\udc64 ${order.customer}</div>`:''}
-    </div>
-    <div class="thermal-divider"></div>
-    <div style="font-size:10px;font-weight:700;letter-spacing:1px;text-align:center;margin-bottom:6px">\u2014 RINCIAN PEMBUKUAN \u2014</div>
-    ${itemsPriceHtml}
-    <div class="thermal-divider"></div>
-    <div style="display:flex;justify-content:space-between;font-size:12px;font-weight:700">
-      <span>TOTAL</span><span>${fmt(order.total)}</span>
-    </div>
-    <div style="font-size:10px;margin-top:4px">Metode: ${(order.paymentMethod||'').toUpperCase()}</div>
-    <div style="font-size:10px">Kasir: ${order.kasir||'\u2014'}</div>
-    <div style="font-size:10px">Selesai: ${doneTime}</div>
-    <div style="font-size:9px;text-align:center;margin-top:8px;letter-spacing:2px;border:1px dashed #ccc;padding:3px">STRUK PEMBUKUAN</div>
-  </div>`;
-  
-  document.getElementById('print-area').innerHTML = struk1 + struk2;
+    <div class="thermal-receipt" style="border-top:3px dashed #000;margin-top:12px;padding-top:12px">
+      <div class="thermal-header">
+        <div style="font-size:11px">${s.nama||'Sana Food'}</div>
+        <div class="thermal-divider-thin"></div>
+        <div class="thermal-order-num">${order.orderNum}</div>
+        <div class="thermal-time">${dateStr} · ${timeStr}</div>
+      </div>
+      <div class="thermal-divider"></div>
+      ${itemsPriceHtml}
+      <div class="thermal-divider"></div>
+      <div style="display:flex;justify-content:space-between;font-size:12px;font-weight:700"><span>TOTAL</span><span>${fmt(order.total)}</span></div>
+      <div style="font-size:10px">Kasir: ${order.kasir||'—'} · Selesai: ${doneTime}</div>
+      <div style="font-size:9px;text-align:center;margin-top:8px;letter-spacing:2px;border:1px dashed #ccc;padding:3px">STRUK PEMBUKUAN</div>
+    </div>`;
   window.print();
-  toast('2 struk dicetak: Pelanggan & Pembukuan \ud83d\udda8','success');
+  toast('2 struk dicetak (browser) 🖨️','success');
 };
 
 // Cek order baru untuk notifikasi dapur
