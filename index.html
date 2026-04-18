@@ -110,10 +110,18 @@ window.initOneSignalForDapur = async function initOneSignalForDapur() {
     window.OneSignalDeferred = window.OneSignalDeferred || [];
     OneSignalDeferred.push(async function(OneSignal) {
       await OneSignal.Notifications.requestPermission();
-      const playerId = await OneSignal.User.PushSubscription.id;
+      // Tunggu subscription siap, retry sampai 5x jika id masih null
+      let playerId = null;
+      for (let i = 0; i < 5; i++) {
+        playerId = OneSignal.User.PushSubscription.id;
+        if (playerId) break;
+        await new Promise(r => setTimeout(r, 1000));
+      }
       if (playerId && currentUser) {
         await saveFcmToken(currentUser.id, playerId);
         console.log('[OneSignal] Player ID saved:', playerId);
+      } else {
+        console.warn('[OneSignal] Player ID tidak tersedia setelah 5x retry');
       }
       OneSignal.Notifications.addEventListener('foregroundWillDisplay', (event) => {
         event.preventDefault();
@@ -256,7 +264,8 @@ window.startListenNotifQueue = function startListenNotifQueue() {
 
 // MASTER: Trigger semua efek notifikasi dapur
 function triggerDapurNotification(info) {
-  // Suara keras
+  // Safety guard — hanya jalankan di device/tab yang login sebagai dapur
+  if (!currentUser || currentUser.role !== 'dapur') return;
   playDapurAlarm();
 
   // Getaran (mobile)
@@ -520,7 +529,8 @@ window.submitOrder = async function() {
     // Tambahkan ke local array sementara (realtime listener akan sync)
     demoOrders.unshift({ ...orderData, _isNew: true });
     activeOrders = demoOrders.filter(o => o.status === 'cooking' || o.status === 'ready');
-    pendingDapurNotif++;
+    // pendingDapurNotif hanya untuk role dapur — kasir/admin tidak perlu banner dapur
+    if (currentUser && currentUser.role === 'dapur') pendingDapurNotif++;
 
     playSound('new');
     toast(`Order ${orderNum} dikirim ke dapur! 🍳`, 'success');
@@ -550,15 +560,26 @@ window.updateOrderStatus = async function(id, status) {
     if (status === 'ready') updates.readyAt = serverTimestamp();
     if (status === 'done') updates.doneAt = serverTimestamp();
     await updateDoc(doc(db, COLS.orders, id), updates);
-    // Local update
+    // Local update — cari di demoOrders DAN activeOrders
+    let orderObj = null;
     const idx = demoOrders.findIndex(o => o.id === id);
     if (idx >= 0) {
       demoOrders[idx].status = status;
       if (status === 'ready') { demoOrders[idx].readyAt = new Date(); playSound('ready'); }
       if (status === 'done') {
         demoOrders[idx].doneAt = new Date();
-        if (currentUser.role === 'dapur') printThermalDapur(demoOrders[idx]);
+        orderObj = demoOrders[idx];
       }
+    }
+    // Juga update di activeOrders jika ada (order dari Firestore)
+    const aidx = activeOrders.findIndex(o => o.id === id);
+    if (aidx >= 0) {
+      activeOrders[aidx].status = status;
+      if (status === 'ready') { activeOrders[aidx].readyAt = new Date(); if(!orderObj) playSound('ready'); }
+      if (status === 'done') { activeOrders[aidx].doneAt = new Date(); if(!orderObj) orderObj = activeOrders[aidx]; }
+    }
+    if (status === 'done' && orderObj && currentUser.role === 'dapur') {
+      printThermalDapur(orderObj);
     }
     activeOrders = demoOrders.filter(o => o.status === 'cooking' || o.status === 'ready');
     renderActiveOrders(); renderKds(); updateOrderBadge(); loadDashboard();
@@ -1412,9 +1433,26 @@ tbody tr:hover{background:var(--surface2)}
 /* PRINT */
 #print-area{display:none}
 @media print{
-  *{display:none!important}
-  #print-area,#print-area *{display:block!important}
-  #print-area .thermal-item,#print-area .thermal-item *{display:flex!important}
+  /* Sembunyikan semua elemen utama secara eksplisit */
+  body>*{display:none!important}
+  #loading-overlay,
+  #toast-container,
+  #login-screen,
+  #app,
+  #modal-overlay,
+  #struk-overlay,
+  #notif-permission-bar,
+  #dapur-new-banner,
+  .dapur-banner,
+  .modal-overlay{display:none!important;visibility:hidden!important;position:static!important}
+  /* Hanya tampilkan struk */
+  #print-area{
+    display:block!important;
+    visibility:visible!important;
+    position:static!important;
+    left:0!important;top:0!important;
+    width:100%!important;
+  }
   body{margin:0;padding:0;background:#fff}
   .receipt{border:none;box-shadow:none;max-width:100%;margin:0;padding:8px;font-size:11px}
   .thermal-receipt{max-width:100%;padding:4px;font-size:12px}
@@ -2543,7 +2581,8 @@ function afterLogin(){
     if(badge) badge.style.display = '';
     kdsInterval = setInterval(()=>{ checkNewOrdersForDapur(); },10000);
     startDapurAutoRefresh();
-    // Start OneSignal & listen notif queue untuk dapur
+    // Start FCM + OneSignal & listen notif queue untuk dapur
+    initFCM();
     initOneSignalForDapur();
     startListenNotifQueue();
   } else {
@@ -2756,8 +2795,8 @@ window.submitOrder=async function(){
     toast(`Order ${orderNum} dikirim ke dapur! 🍳`,'success');
     if(titipanSold.length) toast(`📦 Stok titipan dikurangi: ${titipanSold.map(x=>x.nama+' ×'+x.qty+' (sisa '+x.sisaStok+')').join(', ')}`,'info');
     
-    // Tandai sebagai order baru untuk notif dapur
-    pendingDapurNotif++;
+    // Tandai sebagai order baru untuk notif dapur — hanya jika role dapur
+    if (currentUser && currentUser.role === 'dapur') pendingDapurNotif++;
     
     showStruk(order);
     cart=[]; document.getElementById('cart-customer').value=''; document.getElementById('cash-input').value='';
@@ -2832,25 +2871,28 @@ function showStruk(order){
   document.getElementById('struk-overlay').classList.remove('hidden');
 }
 
-window.printStruk=function(){document.getElementById('print-area').innerHTML=document.getElementById('struk-content').innerHTML;window.print();};
+// Helper: buka popup window khusus print — hanya berisi HTML struk, bersih tanpa elemen lain
+function openPrintWindow(htmlContent){
+  const w=window.open('','_blank','width=420,height=600');
+  if(!w){toast('Popup diblokir browser. Izinkan popup untuk halaman ini.','warn');return;}
+  w.document.write('<!DOCTYPE html><html><head><meta charset="UTF-8"><style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:Arial,sans-serif;font-size:12px;background:#fff;padding:8px;width:80mm}.thermal-receipt{padding:4px;font-size:12px}.thermal-header{text-align:center;margin-bottom:4px}.thermal-order-num{font-size:24px;font-weight:900;text-align:center;letter-spacing:2px;margin:6px 0}.thermal-cust{font-size:11px;text-align:center}.thermal-time{font-size:10px;color:#555;text-align:center}.thermal-divider{border-top:2px dashed #000;margin:6px 0}.thermal-divider-thin{border-top:1px dashed #aaa;margin:4px 0}.thermal-item{display:flex;align-items:flex-start;gap:6px;margin:3px 0}.thermal-qty{font-weight:700;min-width:22px}.thermal-name{flex:1}.thermal-note{font-size:10px;color:#555;margin-left:28px;font-style:italic}.thermal-footer{font-size:10px;text-align:center;color:#555}@media print{body{width:100%;padding:0}}</style></head><body>'+htmlContent+'</body></html>');
+  w.document.close();w.focus();
+  setTimeout(()=>{ w.print(); w.close(); },400);
+}
+window.printStruk=function(){
+  const content=document.getElementById('struk-content');
+  if(!content){toast('Struk tidak ditemukan','error');return;}
+  openPrintWindow(content.innerHTML);
+};
 
 window.kirimStruKeDapur=function(orderId){
   const order=demoOrders.find(o=>o.id===orderId);
   if(!order){toast('Order tidak ditemukan','error');return;}
-  // Tandai order sudah dikirim ke dapur (notifikasi, bukan cetak)
-  order._isNew=true;
-  order._sentToDapur=true;
-  pendingDapurNotif++;
-  playSound('new');
+  // Kirim via Firestore queue & OneSignal — dapur akan terima lewat listener
+  // JANGAN trigger banner/alarm lokal di tab kasir/admin
+  sendPushToDapur({ id: order.id, orderNum: order.orderNum, customer: order.customer, items: order.items||[], total: order.total, kasir: order.kasir });
+  sendOneSignalPushToDapur({ orderNum: order.orderNum, customer: order.customer, itemCount: (order.items||[]).length, kasir: order.kasir, total: order.total });
   closeStruk();
-  // Tampilkan banner dapur jika sedang di halaman dapur
-  const banner=document.getElementById('dapur-new-banner');
-  const countEl=document.getElementById('dapur-new-count');
-  if(banner&&countEl){
-    countEl.textContent=pendingDapurNotif;
-    banner.classList.remove('hidden');
-    setTimeout(()=>banner.classList.add('hidden'),8000);
-  }
   renderKds(); updateOrderBadge();
   toast(`Notifikasi order ${order.orderNum} dikirim ke dapur! 🔔`,'success');
 };
@@ -2893,22 +2935,8 @@ function renderActiveOrders(){
   }).join('');
 }
 
-window.updateOrderStatus=function(id,status){
-  const idx=demoOrders.findIndex(o=>o.id===id); if(idx<0)return;
-  const order=demoOrders[idx];
-  demoOrders[idx].status=status;
-  if(status==='ready'){demoOrders[idx].readyAt=new Date();playSound('ready');}
-  if(status==='done'){
-    demoOrders[idx].doneAt=new Date();
-    // Auto print thermal jika yang menyelesaikan adalah dapur
-    if(currentUser.role==='dapur'){
-      printThermalDapur(demoOrders[idx]);
-    }
-  }
-  activeOrders=demoOrders.filter(o=>o.status==='cooking'||o.status==='ready');
-  renderActiveOrders(); renderKds(); updateOrderBadge(); loadDashboard();
-  toast(status==='ready'?'Order siap saji! ✅':status==='done'?(currentUser.role==='dapur'?'Order selesai — 2 struk dicetak 🖨':'Order selesai! ✅'):status==='cancelled'?'Order dibatalkan':'Order diperbarui','success');
-};
+// updateOrderStatus sudah didefinisikan di Firebase module di atas (async, update Firestore)
+// Jangan override di sini — cukup gunakan yang sudah ada.
 
 // =============================================
 // KDS
@@ -3655,7 +3683,23 @@ function updateBtStatus(connected, name=''){
 }
 
 async function connectBluetooth(){
-  if(!navigator.bluetooth){toast('Web Bluetooth tidak didukung. Gunakan Chrome/Edge.','error');return;}
+  // Deteksi platform secara spesifik untuk pesan error yang berguna
+  if(!navigator.bluetooth){
+    const ua=navigator.userAgent;
+    const isIOS=/iPad|iPhone|iPod/.test(ua);
+    const isFirefox=/Firefox/.test(ua);
+    const isHTTP=location.protocol==='http:'&&location.hostname!=='localhost';
+    if(isIOS){
+      toast('❌ iOS tidak mendukung Web Bluetooth. Gunakan Android Chrome untuk print thermal.','error');
+    } else if(isFirefox){
+      toast('❌ Firefox tidak mendukung Web Bluetooth. Gunakan Chrome atau Edge.','error');
+    } else if(isHTTP){
+      toast('❌ Web Bluetooth butuh HTTPS. Akses via https:// bukan http://.','error');
+    } else {
+      toast('❌ Browser ini tidak mendukung Web Bluetooth. Gunakan Chrome/Edge di Android atau desktop.','error');
+    }
+    return;
+  }
   const btnIds=['btn-bt-connect','btn-bt-connect-dapur'];
   btnIds.forEach(id=>{const b=document.getElementById(id);if(b){b.disabled=true;b.textContent='🔍 Mencari...';}});
   try{
@@ -3841,9 +3885,18 @@ async function doPrintOrderBT(order){
 
 // Tombol print di struk dapur
 window.triggerPrintThermalBT = async function(orderId){
-  const order=demoOrders.find(o=>o.id===orderId);
+  // Lookup dari activeOrders (Firestore) dulu, fallback ke demoOrders
+  const order=activeOrders.find(o=>o.id===orderId)||demoOrders.find(o=>o.id===orderId);
   if(!order){toast('Order tidak ditemukan','error');return;}
-  if(!btCharacteristic){toast('Hubungkan printer Bluetooth dulu! Tekan 📡 Hubungkan','warn');return;}
+  if(!btCharacteristic){
+    const ua=navigator.userAgent;
+    if(/iPad|iPhone|iPod/.test(ua)){
+      toast('iOS tidak mendukung Web Bluetooth. Gunakan Android Chrome.','warn');
+    } else {
+      toast('Hubungkan printer Bluetooth dulu! Tekan 📡 Hubungkan','warn');
+    }
+    return;
+  }
   const btn=document.getElementById('btn-bt-print-dapur');
   if(btn){btn.disabled=true;btn.textContent='⏳ Printing...';}
   try{ await doPrintOrderBT(order); }
@@ -3854,10 +3907,16 @@ window.triggerPrintThermalBT = async function(orderId){
 // Print struk untuk kasir/admin via BT — cek koneksi dulu
 window.printStrukKasirBT = async function(orderId){
   if(!btCharacteristic){
-    toast('⚠️ Hubungkan printer Bluetooth dulu! Tekan tombol 📡 Hubungkan','warn');
+    const ua=navigator.userAgent;
+    if(/iPad|iPhone|iPod/.test(ua)){
+      toast('iOS tidak mendukung Web Bluetooth. Gunakan Android Chrome untuk print thermal.','warn');
+    } else {
+      toast('⚠️ Hubungkan printer Bluetooth dulu! Tekan tombol 📡 Hubungkan','warn');
+    }
     return;
   }
-  const order=demoOrders.find(o=>o.id===orderId);
+  // Lookup dari activeOrders (Firestore) dulu, fallback ke demoOrders
+  const order=activeOrders.find(o=>o.id===orderId)||demoOrders.find(o=>o.id===orderId);
   if(!order){toast('Order tidak ditemukan','error');return;}
   const btn=document.getElementById('btn-bt-print-kasir');
   if(btn){btn.disabled=true;btn.textContent='⏳ Printing...';}
@@ -3868,6 +3927,10 @@ window.printStrukKasirBT = async function(orderId){
 
 // printThermalDapur — upgrade: pakai BT jika terhubung, fallback ke window.print()
 window.printThermalDapur = async function(order){
+  // order bisa berupa object langsung atau orderId string
+  if(typeof order === 'string'){
+    order = activeOrders.find(o=>o.id===order) || demoOrders.find(o=>o.id===order);
+  }
   if(!order) return;
   if(btCharacteristic){
     // Pakai Bluetooth
@@ -3887,7 +3950,7 @@ window.printThermalDapur = async function(order){
       <span><span class="thermal-qty">${i.qty}\u00d7</span> ${i.nama}</span>
       <span style="font-family:monospace">${fmt(i.qty*i.harga)}</span>
     </div>`).join('');
-  document.getElementById('print-area').innerHTML=`
+  const struкHtml=`
     <div class="thermal-receipt">
       <div class="thermal-header">
         <div style="font-size:11px">${s.nama||'Sana Food'}</div>
@@ -3921,7 +3984,7 @@ window.printThermalDapur = async function(order){
       <div style="font-size:10px">Kasir: ${order.kasir||'—'} · Selesai: ${doneTime}</div>
       <div style="font-size:9px;text-align:center;margin-top:8px;letter-spacing:2px;border:1px dashed #ccc;padding:3px">STRUK PEMBUKUAN</div>
     </div>`;
-  window.print();
+  openPrintWindow(struкHtml);
   toast('2 struk dicetak (browser) 🖨️','success');
 };
 
